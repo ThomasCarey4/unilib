@@ -65,6 +65,41 @@ ln -s ~/src/unilib/skills/ingest ~/.claude/skills/ingest
 
 The client installs without the `server` extra: it needs only the standard library and `mcp`.
 
+## NixOS / Home Manager
+
+The flake provides `packages.<system>.{unilib,unilib-client}`, a NixOS module for the server and a Home Manager module for clients. The server package uses PyTorch's official CPU wheel (MKL) on x86_64-linux with Python 3.14: nixpkgs' source-built torch (OpenBLAS/Eigen) made search about 4× slower.
+
+```nix
+# flake.nix inputs
+unilib = { url = "github:ThomasCarey4/unilib"; inputs.nixpkgs.follows = "nixpkgs"; };
+
+# server host (NixOS)
+imports = [ inputs.unilib.nixosModules.default ];
+services.unilib = {
+  enable = true;
+  libraryDir = "/srv/unilib";
+  tokenFile = "/run/secrets/unilib-token";
+  convert.package = pkgs.libreoffice;          # optional: PPTX conversion
+  webdav = { enable = true; environmentFile = "/run/secrets/unilib-webdav.env"; };  # UNILIB_WEBDAV_PASSWORD=…
+};
+networking.firewall.allowedTCPPorts = [ 8095 8091 ];   # the module opens nothing itself
+
+# client (Home Manager)
+imports = [ inputs.unilib.homeManagerModules.default ];
+programs.unilib-client = {
+  enable = true;
+  settings.webdav = { url = "http://server:8091"; user = "unilib"; password_file = "/run/secrets/unilib-webdav"; };
+  ingestSkill.enable = true;                    # ~/.claude/skills/ingest
+  claudeCode = {
+    register = true;                            # merges unilib + unilib-local into ~/.claude.json
+    serverUrl = "http://server:8095/mcp";
+    tokenFile = "/run/secrets/unilib-token";    # read at connect time via headersHelper; never stored
+  };
+};
+```
+
+By default the server runs as a `unilib` system user with `ProtectHome=true`. To index papers from a user's Zotero, set `user` to that user and `protectHome = "read-only"`.
+
 ## Usage
 
 ### Adding slides

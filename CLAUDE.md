@@ -18,6 +18,13 @@ One distribution, two roles:
   - `unilib-local-mcp` (`check_bib`, `zotero_sync_report`, `zotero_find`) and `unilib-client` (`drop`, `check-bib`, `zotero …`) act on the current machine.
   - `test_client_cli.py::test_client_imports_nothing_heavy` enforces that the client imports nothing heavy.
 
+Nix (`flake.nix`, `nix/`):
+- `nix/package.nix` builds both roles from nixpkgs' python3Packages; `server = false` gives the client.
+- `nix/torch-cpu.nix` swaps in PyTorch's CPU wheel, because nixpkgs' torch (OpenBLAS/Eigen) is ~4× slower end to end. It skips the tests of transformers and sentence-transformers, whose test inputs (torchvision, …) would rebuild against it.
+- `nix/server.nix` is the NixOS module `services.unilib`: socket + service, optional WebDAV.
+- `nix/client.nix` is the Home Manager module `programs.unilib-client`, which can merge the MCP entries into `~/.claude.json` with a `headersHelper` for the token.
+- `nix build .#unilib` runs the pytest suite (minus slow/eval). After bumping torch in nixpkgs, update the wheel's version and hash.
+
 `skills/ingest/SKILL.md` is the `/ingest` workflow, driven entirely by the server's ingest tools. Follow it exactly: nothing moves before the user approves the table.
 
 ## Commands
