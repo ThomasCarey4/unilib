@@ -23,8 +23,8 @@ SD_LISTEN_FDS_START = 3  # first fd systemd passes (sd_listen_fds(3))
 
 
 class Gate:
-    """ASGI middleware: rejects HTTP requests without the bearer token (when one is set) and
-    records activity, so `idle_for` is 0 while a request is in flight."""
+    """ASGI middleware: rejects HTTP requests without the bearer token (when one is set), declines
+    the GET event stream, and records activity, so `idle_for` is 0 while a request is in flight."""
 
     def __init__(self, app, token: str | None, clock: Callable[[], float] = time.monotonic):
         self.app = app
@@ -46,6 +46,14 @@ class Gate:
                             "headers": [(b"content-type", b"text/plain"), (b"www-authenticate", b"Bearer")]})
                 await send({"type": "http.response.body", "body": b"unauthorized\n"})
                 return
+        if scope["method"] == "GET":
+            # The optional GET stream is for server-initiated messages; a stateless JSON server
+            # sends none. Clients (Claude Code) hold it open indefinitely, which would count as
+            # in-flight forever and block the idle exit, so decline it (spec: 405 when unsupported).
+            await send({"type": "http.response.start", "status": 405,
+                        "headers": [(b"allow", b"POST"), (b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"no server-initiated stream\n"})
+            return
         self._inflight += 1
         try:
             await self.app(scope, receive, send)

@@ -49,6 +49,15 @@ def test_search_over_http_without_session(lib):
         assert f"{SCI}/L09_Line-Search.pdf p.2" in text
 
 
+def test_get_stream_is_declined_and_does_not_hold_the_server_up():
+    gate = _client("s3cret")
+    with TestClient(gate) as c:
+        r = c.get("/mcp", headers={"accept": "text/event-stream", "authorization": "Bearer s3cret"})
+        assert r.status_code == 405 and r.headers["allow"] == "POST"
+        assert c.get("/mcp").status_code == 401  # auth still comes first
+    assert gate._inflight == 0
+
+
 class _Server:
     should_exit = False
 
