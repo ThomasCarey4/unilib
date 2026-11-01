@@ -13,7 +13,9 @@ let
   inherit (lib) mkOption types;
   defaultCache = "/var/cache/unilib/models";
 
-  davConfig = (pkgs.formats.yaml { }).generate "webdav-unilib.yaml" {
+  # The base config; at start `unilib webdav-config` adds read rules for each module
+  # folder in modules.toml (webdav.readModules) and writes the config webdav uses.
+  davBase = (pkgs.formats.json { }).generate "webdav-unilib-base.json" {
     address = cfg.webdav.address;
     port = cfg.webdav.port;
     directory = cfg.libraryDir;
@@ -159,14 +161,23 @@ in
         type = types.str;
         description = "File with UNILIB_WEBDAV_PASSWORD=… (systemd EnvironmentFile).";
       };
+      readModules = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Give the WebDAV user read access to each module folder listed in modules.toml (so
+          clients can fetch originals). The rules are rebuilt when WebDAV starts, and WebDAV
+          restarts whenever modules.toml changes. modules.toml, .index/ and any other files
+          stay unreachable.
+        '';
+      };
       readableRegex = mkOption {
         type = types.nullOr types.str;
         default = null;
         example = "^/COMP[^/]*/";
         description = ''
-          Paths (regex on the request path) the WebDAV user may read, e.g. the module folders,
-          so clients can fetch originals. null: only _ingest/ is reachable. Keep modules.toml,
-          .index/, eval/ and any notes outside the match.
+          Extra paths (regex on the request path) the WebDAV user may read, beyond the module
+          folders of readModules. null: none. Keep modules.toml, .index/ and notes outside it.
         '';
       };
     };
@@ -224,13 +235,33 @@ in
           description = "WebDAV share of the unilib library (ingest drop zone)";
           wantedBy = [ "multi-user.target" ];
           after = [ "network.target" ];
+          environment.UNILIB_ROOT = cfg.libraryDir;
           serviceConfig = hardening // {
             User = cfg.user;
             Group = cfg.group;
             EnvironmentFile = cfg.webdav.environmentFile;
-            ExecStart = "${lib.getExe pkgs.webdav} -c ${davConfig}";
+            RuntimeDirectory = "webdav-unilib";
+            ExecStartPre =
+              if cfg.webdav.readModules then
+                "${cfg.package}/bin/unilib webdav-config ${davBase} %t/webdav-unilib/config.json"
+              else
+                "${pkgs.coreutils}/bin/cp ${davBase} %t/webdav-unilib/config.json";
+            ExecStart = "${lib.getExe pkgs.webdav} -c %t/webdav-unilib/config.json";
             Restart = "on-failure";
             ReadWritePaths = [ "${cfg.libraryDir}/_ingest" ];
+          };
+        };
+
+        # Module folders come from modules.toml: pick up added or renamed modules.
+        systemd.paths.webdav-unilib-modules = lib.mkIf cfg.webdav.readModules {
+          wantedBy = [ "paths.target" ];
+          pathConfig.PathChanged = "${cfg.libraryDir}/modules.toml";
+        };
+        systemd.services.webdav-unilib-modules = lib.mkIf cfg.webdav.readModules {
+          description = "Restart webdav-unilib after modules.toml changes";
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = "${pkgs.systemd}/bin/systemctl try-restart webdav-unilib.service";
           };
         };
       })

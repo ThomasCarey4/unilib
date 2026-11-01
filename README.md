@@ -83,7 +83,6 @@ services.unilib = {
   webdav = {
     enable = true;
     environmentFile = "/run/secrets/unilib-webdav.env";  # UNILIB_WEBDAV_PASSWORD=…
-    readableRegex = "^/COMP[^/]*/";                      # optional: read-only module folders; default only _ingest/
   };
 };
 networking.firewall.allowedTCPPorts = [ 8095 8091 ];   # the module opens nothing itself
@@ -101,6 +100,8 @@ programs.unilib-client = {
   };
 };
 ```
+
+WebDAV lets clients read the module folders listed in `modules.toml` and write to `_ingest/`. It rebuilds its rules on start and restarts when `modules.toml` changes; everything else (`modules.toml`, `.index/`, other folders) stays unreachable. Set `webdav.readModules = false` to share only `_ingest/`.
 
 By default the server runs as a `unilib` system user with `ProtectHome=true`. To index papers from a user's Zotero, set `user` to that user and `protectHome = "read-only"`.
 

@@ -293,3 +293,16 @@ def test_search_books_flag(lib, capsys):
     assert "B01_Burden-Ch2-Roots.pdf" not in capsys.readouterr().out
     assert cli.main(["search", "quadratically", "--books", "--no-rerank"]) == 0
     assert "B01_Burden-Ch2-Roots.pdf" in capsys.readouterr().out
+
+
+def test_webdav_config_reads_module_folders_from_modules_toml(lib, tmp_path, capsys):
+    import json
+    base = tmp_path / "base.json"
+    base.write_text(json.dumps({"port": 8091, "users": [
+        {"username": "u", "rules": [{"path": "/_ingest/", "permissions": "CRUD"}]}]}))
+    out = tmp_path / "out.json"
+    assert cli.main(["webdav-config", str(base), str(out)]) == 0
+    rules = json.loads(out.read_text())["users"][0]["rules"]
+    assert rules == [{"path": f"/{SCI}/", "permissions": "R"}, {"path": f"/{KRR}/", "permissions": "R"},
+                     {"path": "/_ingest/", "permissions": "CRUD"}]
+    assert "2 module folders" in capsys.readouterr().out

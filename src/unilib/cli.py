@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
 import re
 import shlex
 import shutil
@@ -10,7 +11,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .config import db_path, library_root, module_by_code
+from .config import db_path, library_root, load_modules, module_by_code
 from .models import make_embedder, make_reranker
 from .evaluate import evaluate, load_golden
 from .index import index_library
@@ -146,6 +147,21 @@ def cmd_eval(args, root: Path) -> int:
     return 0
 
 
+def cmd_webdav_config(args, root: Path) -> int:
+    """Copy a WebDAV server config (JSON), giving its users read access to each module folder
+    in modules.toml: the module's NixOS service runs this before WebDAV starts."""
+    cfg = json.loads(args.base.read_text())
+    read = [{"path": f"/{m.folder}/", "permissions": "R"} for m in load_modules(root)]
+    for user in cfg.get("users", []):
+        # webdav applies rules last to first, so these go first: later rules (e.g. _ingest/ CRUD) win.
+        user["rules"] = read + user.get("rules", [])
+    tmp = args.out.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    tmp.replace(args.out)
+    print(f"{args.out}: read access to {len(read)} module folders")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="unilib", description="Lecture-slide library tools")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -204,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--rerank-n", type=int, metavar="N", help="fused candidates to rerank")
     s.add_argument("--no-rerank", action="store_true", help="turn reranking off")
     s.set_defaults(func=cmd_eval)
+
+    s = sub.add_parser("webdav-config", help="add read rules for every module folder to a WebDAV config (JSON)")
+    s.add_argument("base", type=Path)
+    s.add_argument("out", type=Path)
+    s.set_defaults(func=cmd_webdav_config)
     return p
 
 
