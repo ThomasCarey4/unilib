@@ -24,7 +24,8 @@ SD_LISTEN_FDS_START = 3  # first fd systemd passes (sd_listen_fds(3))
 
 class Gate:
     """ASGI middleware: rejects HTTP requests without the bearer token (when one is set), declines
-    the GET event stream, and records activity, so `idle_for` is 0 while a request is in flight."""
+    the GET event stream, and records activity, so `idle_for` is 0 while a request is in flight.
+    Event-stream responses (subscriptions) stop counting as in flight once they start."""
 
     def __init__(self, app, token: str | None, clock: Callable[[], float] = time.monotonic):
         self.app = app
@@ -55,10 +56,24 @@ class Gate:
             await send({"type": "http.response.body", "body": b"no server-initiated stream\n"})
             return
         self._inflight += 1
+        counted = True
+
+        async def watch(message):
+            # A text/event-stream response is a subscription (MCP subscriptions/listen) that the
+            # client holds open for its whole session; it must not keep the server from idling.
+            nonlocal counted
+            if (counted and message["type"] == "http.response.start"
+                    and dict(message.get("headers", [])).get(b"content-type", b"").startswith(b"text/event-stream")):
+                counted = False
+                self._inflight -= 1
+                self._last = self._clock()
+            await send(message)
+
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, watch)
         finally:
-            self._inflight -= 1
+            if counted:
+                self._inflight -= 1
             self._last = self._clock()
 
 
@@ -114,7 +129,8 @@ def serve_http(mcp, host: str, port: int, idle_s: float | None) -> None:
     app = mcp.streamable_http_app(stateless_http=True, json_response=True,
                                   host="127.0.0.1" if token is None else "0.0.0.0")
     gate = Gate(app, token)
-    server = uvicorn.Server(uvicorn.Config(gate, log_level="warning"))
+    # Open subscription streams would otherwise hold an idle exit forever.
+    server = uvicorn.Server(uvicorn.Config(gate, log_level="warning", timeout_graceful_shutdown=5))
 
     async def run() -> None:
         tasks = [asyncio.create_task(server.serve(sockets=[sock]))]

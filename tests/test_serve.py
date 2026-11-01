@@ -58,6 +58,43 @@ def test_get_stream_is_declined_and_does_not_hold_the_server_up():
     assert gate._inflight == 0
 
 
+def test_event_stream_responses_do_not_count_as_in_flight():
+    """MCP subscriptions/listen: a POST whose SSE response stays open for the client's session."""
+    opened, release = asyncio.Event(), asyncio.Event()
+
+    async def app(scope, receive, send):
+        if scope["path"] == "/listen":
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"text/event-stream")]})
+            opened.set()
+            await release.wait()
+        else:
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await opened.wait()
+        await send({"type": "http.response.body", "body": b""})
+
+    gate = Gate(app, None)
+    scope = lambda path: {"type": "http", "method": "POST", "path": path, "headers": []}
+
+    async def noop_send(message):
+        pass
+
+    async def scenario():
+        listen = asyncio.create_task(gate(scope("/listen"), None, noop_send))
+        await opened.wait()
+        assert gate._inflight == 0  # the open stream does not hold the server up
+        call = asyncio.create_task(gate(scope("/call"), None, noop_send))
+        await asyncio.sleep(0)
+        await call
+        assert gate._inflight == 0
+        release.set()
+        await listen
+        assert gate._inflight == 0
+
+    asyncio.run(scenario())
+
+
 class _Server:
     should_exit = False
 
