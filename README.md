@@ -80,7 +80,11 @@ services.unilib = {
   libraryDir = "/srv/unilib";
   tokenFile = "/run/secrets/unilib-token";
   convert.package = pkgs.libreoffice;          # optional: PPTX conversion
-  webdav = { enable = true; environmentFile = "/run/secrets/unilib-webdav.env"; };  # UNILIB_WEBDAV_PASSWORD=…
+  webdav = {
+    enable = true;
+    environmentFile = "/run/secrets/unilib-webdav.env";  # UNILIB_WEBDAV_PASSWORD=…
+    readableRegex = "^/COMP[^/]*/";                      # optional: read-only module folders; default only _ingest/
+  };
 };
 networking.firewall.allowedTCPPorts = [ 8095 8091 ];   # the module opens nothing itself
 

@@ -24,17 +24,17 @@ let
         password = "{env}UNILIB_WEBDAV_PASSWORD";
         permissions = "none";
         # Applied last to first: the first match from the end wins.
-        rules = [
-          {
-            # module folders: read only (modules.toml, .index, eval/ etc. stay hidden)
+        rules =
+          lib.optional (cfg.webdav.readableRegex != null) {
             regex = cfg.webdav.readableRegex;
             permissions = "R";
           }
-          {
-            path = "/_ingest/";
-            permissions = "CRUD";
-          }
-        ];
+          ++ [
+            {
+              path = "/_ingest/";
+              permissions = "CRUD";
+            }
+          ];
       }
     ];
   };
@@ -139,7 +139,7 @@ in
     };
 
     webdav = {
-      enable = lib.mkEnableOption "a WebDAV share of the library: read/write _ingest/, read-only module folders";
+      enable = lib.mkEnableOption "a WebDAV share of the library: read/write _ingest/, optionally read-only module folders";
       address = mkOption {
         type = types.str;
         default = "0.0.0.0";
@@ -160,12 +160,13 @@ in
         description = "File with UNILIB_WEBDAV_PASSWORD=… (systemd EnvironmentFile).";
       };
       readableRegex = mkOption {
-        type = types.str;
-        default = "^/[^/._][^/]*/";
+        type = types.nullOr types.str;
+        default = null;
+        example = "^/COMP[^/]*/";
         description = ''
-          Paths the WebDAV user may read. The default is everything inside top-level folders
-          not starting with "." or "_" (module folders), so modules.toml, .index/ and files in
-          the root stay hidden. Restrict it further if the root holds other private folders.
+          Paths (regex on the request path) the WebDAV user may read, e.g. the module folders,
+          so clients can fetch originals. null: only _ingest/ is reachable. Keep modules.toml,
+          .index/, eval/ and any notes outside the match.
         '';
       };
     };
