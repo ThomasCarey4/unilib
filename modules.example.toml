@@ -1,0 +1,22 @@
+# Copy to <library>/modules.toml (the library root is $UNILIB_ROOT, default ~/Documents/UniLibrary).
+# `folder` is the directory name under the library root; keywords help /ingest classify files.
+
+[[module]]
+code = "MATH3001"
+name = "Scientific Computation"
+semester = 1
+folder = "MATH3001_Scientific-Computation"
+keywords = ["Newton", "Jacobian", "optimisation", "finite difference", "PDE"]
+
+[[module]]
+code = "COMP3002"
+name = "Knowledge Representation & Reasoning"
+semester = 2
+folder = "COMP3002_Knowledge-Representation-Reasoning"
+keywords = ["logic", "ontology", "description logic", "resolution"]
+
+# Optional: index the papers of a Zotero collection as module PAPERS (paths as seen by the server).
+# [papers]
+# bib = "~/Zotero/exports/uni.bib"              # Better BibTeX auto-export of the collection
+# reports = "~/Documents/LaTeX/*/refs.bib"      # report bibs; only folders holding .unilib-report count
+# zotero_dir = "~/Zotero"

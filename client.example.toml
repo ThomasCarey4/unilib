@@ -1,0 +1,13 @@
+# Copy to ~/.config/unilib/client.toml (or point $UNILIB_CLIENT_CONFIG at it) on each client machine.
+
+# This machine's Zotero layout (all optional; these are the defaults).
+[papers]
+bib = "~/Zotero/exports/uni.bib"
+reports = "~/Documents/LaTeX/*/refs.bib"
+zotero_dir = "~/Zotero"
+
+# The server's WebDAV share of the library root, for `unilib-client drop`.
+[webdav]
+url = "http://server.example:8091"
+user = "unilib"
+password_file = "~/.config/unilib/webdav-password"

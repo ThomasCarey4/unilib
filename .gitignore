@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+# machine-specific agent context (hostnames, paths); never committed
+CLAUDE.local.md
