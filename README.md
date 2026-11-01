@@ -163,3 +163,9 @@ uv run pytest -m "not slow and not eval"   # also skip tests that download the r
 uv run pytest -m eval                      # ranking thresholds on <library>/eval/*.toml against the real index
 uv run unilib eval --compare               # score every ranking configuration
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE).
+
+The server depends on [PyMuPDF](https://github.com/pymupdf/PyMuPDF), which is licensed under AGPL-3.0 (or a commercial licence from Artifex). unilib's own code stays MIT. But if you distribute unilib together with PyMuPDF, or offer a modified PyMuPDF over a network, the AGPL's terms apply to that combination. The client (`unilib-client`, `unilib-local-mcp`) doesn't use PyMuPDF.

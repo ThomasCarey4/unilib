@@ -3,6 +3,8 @@ name = "unilib"
 version = "0.1.0"
 description = "Lecture-slide library with hybrid search and an MCP server"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 # The base install is the client (unilib-client, unilib-local-mcp): stdlib + mcp only.
 # The search server needs the `server` extra (models, PDF tooling).
 dependencies = [

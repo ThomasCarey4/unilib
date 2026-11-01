@@ -43,6 +43,7 @@ python3Packages.buildPythonApplication {
     root = ../.;
     fileset = lib.fileset.unions [
       ../pyproject.toml
+      ../LICENSE
       ../src
       ../tests
       ../skills
@@ -76,6 +77,8 @@ python3Packages.buildPythonApplication {
 
   meta = {
     description = "Searchable library of lecture slides, notebooks and papers, served over MCP";
+    homepage = "https://github.com/ThomasCarey4/unilib";
+    license = lib.licenses.mit;
     mainProgram = if server then "unilib-mcp" else "unilib-client";
   };
 }
