@@ -125,7 +125,8 @@ def _get_reranker() -> Reranker | None:
 
 @mcp.tool()
 def search(query: str, module: str | None = None, k: int = 8,
-           citekey: str | None = None, report: str | None = None, books: bool | None = None) -> str:
+           citekey: str | None = None, report: str | None = None, books: bool | None = None,
+           superseded: bool = False) -> str:
     """Hybrid keyword + semantic search over this library's documents (slides, book chapters, docs)
     and its Zotero papers (module PAPERS).
 
@@ -147,13 +148,15 @@ def search(query: str, module: str | None = None, k: int = 8,
 
     Args:
         query: what to look for, in natural language or exact terms
-        module: optional module code filter, e.g. MATH3001
+        module: optional module code filter, e.g. MATH3001, or several comma-separated, e.g. PG,TSDB
         k: number of results (default 8, max 50)
         citekey: only this paper (module PAPERS), e.g. vaswani2017 — use to check a \\cite{…} claim
         report: only papers in this report's bibliography (names from `list_library`)
         books: include book chapters (B… files). Default: the library's setting (see the server
             instructions); in the uni library they are off — turn on for background, derivations
             or worked examples when the slides are thin
+        superseded: also search documents marked superseded (older versions of a source); a hit's
+            `[version]` tag says which version it describes
     """
     if not search_mod._tokens(fold(query)):  # a lone symbol like ∇ folds to a keyword
         return "Empty query."
@@ -167,7 +170,7 @@ def search(query: str, module: str | None = None, k: int = 8,
                 "run `unilib index` once with network access to download models.")
     try:
         hits = run_search(root, embedder, query, module=module, k=k, citekey=citekey,
-                        report=report, books=books, reranker=_get_reranker())
+                        report=report, books=books, superseded=superseded, reranker=_get_reranker())
     except IndexMismatchError as e:
         return f"Search unavailable: {e}."
     except FileNotFoundError:
@@ -303,7 +306,9 @@ def list_library(module: str | None = None) -> str:
                 stale = " · stale (re-run `unilib index`)" if s.state == "stale" else ""
                 unit = {"ipynb": "cells", "md": "sections"}.get(s.kind, "pages")
                 book = " · reading list" if parse_name(name)[0] == "B" else ""
-                lines.append(f"  {name} · {s.n_pages} {unit}{book}{stale}")
+                ver = f" · {s.version}" if s.version else ""
+                sup = " · superseded" if s.superseded else ""
+                lines.append(f"  {name} · {s.n_pages} {unit}{book}{ver}{sup}{stale}")
         if not docs:
             lines.append("  (empty)")
     if papers_cfg and (not module or module.upper() == PAPERS):

@@ -70,6 +70,7 @@ class Hit:
     kind: str = "pdf"
     also_pages: tuple[int, ...] = ()  # near-identical adjacent pages collapsed into this hit
     citekey: str | None = None        # set for Zotero papers (module PAPERS)
+    version: str | None = None        # e.g. "PostgreSQL 16.10" (sources.toml / frontmatter)
 
     def cite(self) -> str:
         unit = {"ipynb": "cell ", "md": "§"}.get(self.kind, "p.")
@@ -78,6 +79,8 @@ class Hit:
             s += f" (orig {Path(self.original_file).name} p.{self.original_page})"
         if self.also_pages:
             s += f" (also {', '.join(unit + r for r in _runs(self.also_pages))})"
+        if self.version:
+            s += f" [{self.version}]"
         return s
 
 
@@ -144,12 +147,17 @@ def _snippet(text: str, query: str, width: int = 300) -> str:
 
 
 def _doc_filter(module: str | None, citekey: str | None, report: str | None,
-                exclude_books: bool = False) -> tuple[str, list]:
-    """SQL condition over docs alias `d` plus its parameters ('' when unfiltered)."""
+                exclude_books: bool = False, exclude_superseded: bool = False) -> tuple[str, list]:
+    """SQL condition over docs alias `d` plus its parameters ('' when unfiltered).
+    `module` may be a comma-separated list of codes."""
     clauses, params = [], []
-    if module:
+    codes = [c.strip() for c in module.split(",") if c.strip()] if module else []
+    if len(codes) == 1:
         clauses.append("d.module = ?")
-        params.append(module)
+        params.append(codes[0])
+    elif codes:
+        clauses.append(f"d.module IN ({','.join('?' * len(codes))})")
+        params += codes
     if citekey:
         clauses.append("d.citekey = ?")
         params.append(citekey)
@@ -158,6 +166,8 @@ def _doc_filter(module: str | None, citekey: str | None, report: str | None,
         params.append(f",{report},")
     if exclude_books:
         clauses.append("d.type != 'B'")
+    if exclude_superseded:
+        clauses.append("d.superseded = 0")
     return " AND ".join(clauses), params
 
 
@@ -221,12 +231,13 @@ def _books_default(root: Path) -> bool:
 
 def search(root: Path, embedder: Embedder, query: str, module: str | None = None,
            k: int = 8, pool: int = 50, *, citekey: str | None = None, report: str | None = None,
-           books: bool | None = None, config: RankConfig | None = None,
+           books: bool | None = None, superseded: bool = False, config: RankConfig | None = None,
            reranker: Reranker | None = None, rerank_n: int | None = None) -> list[Hit]:
     """Hybrid BM25 + vector search fused by RRF. With `config.rerank` and a `reranker`,
     the top `rerank_n` (default RERANK_N) fused candidates are reordered by cross-encoder
     score before pages are deduplicated, collapsed and cut to k. Book parts (type B) are
-    excluded unless `books`; None means the library's `[library] books_default` (False if unset)."""
+    excluded unless `books`; None means the library's `[library] books_default` (False if unset).
+    Docs marked superseded (older versions) are excluded unless `superseded`."""
     config = config or DEFAULT_RANK
     if books is None:
         books = _books_default(root)
@@ -254,7 +265,10 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
             raise IndexMismatchError()
         exclude_books = not books and conn.execute(
             "SELECT 1 FROM docs WHERE type = 'B' LIMIT 1").fetchone() is not None
-        where, params = _doc_filter(module, citekey, report, exclude_books)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)")}
+        exclude_superseded = not superseded and "superseded" in cols and conn.execute(
+            "SELECT 1 FROM docs WHERE superseded = 1 LIMIT 1").fetchone() is not None
+        where, params = _doc_filter(module, citekey, report, exclude_books, exclude_superseded)
 
         fts_ranked = _fts_ranked(conn, query, where, params, pool, config.and_first)
 
@@ -280,9 +294,9 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
             for rank, cid in enumerate(ranked):
                 scores[cid] += w / (RRF_K + rank + 1)
 
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)")}
         kind = "d.kind" if "kind" in cols else "'pdf' AS kind"  # pre-migration DBs lack the column
         ck = "d.citekey" if "citekey" in cols else "NULL AS citekey"
+        ck += ", d.version" if "version" in cols else ", NULL AS version"
         hits: list[Hit] = []
         best_text: list[str] = []  # whitespace-collapsed text of each hit's best-scoring chunk
         seen: set[tuple[str, int]] = set()
@@ -313,7 +327,7 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
                 original_file=r["original_file"],
                 original_page=r["page"] + r["page_offset"] if r["original_file"] else None,
                 snippet=_snippet(r["text"], query), score=round(scores[cid], 4), kind=r["kind"],
-                citekey=r["citekey"],
+                citekey=r["citekey"], version=r["version"],
             ))
             if len(hits) == k:
                 break

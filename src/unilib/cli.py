@@ -135,7 +135,7 @@ def cmd_search(args, root: Path) -> int:
         return 1
     reranker = make_reranker() if DEFAULT_RANK.rerank and not args.no_rerank else None
     hits = search(root, make_embedder(), args.query, module=args.module, k=args.k, reranker=reranker,
-                  citekey=args.citekey, report=args.report, books=args.books)
+                  citekey=args.citekey, report=args.report, books=args.books, superseded=args.superseded)
     for i, h in enumerate(hits, 1):
         print(f"[{i}] {h.cite()} — {h.module} · {h.title}\n    {h.snippet}\n")
     if last_rerank_error():
@@ -225,6 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--report", help="only papers cited by this report")
     s.add_argument("--books", action=argparse.BooleanOptionalAction, default=None,
                    help="include book chapters (type B); default: the library's [library] books_default (off)")
+    s.add_argument("--superseded", action="store_true", help="also search documents marked superseded in sources.toml")
     s.add_argument("--no-rerank", action="store_true", help="skip the cross-encoder (no model load)")
     s.set_defaults(func=cmd_search)
 

@@ -310,7 +310,7 @@ def test_schema_version_mismatch_forces_rebuild(lib):
     index_library(lib, FakeEmbedder(), log=_quiet)
     conn = connect(lib)
     try:
-        assert get_meta(conn, "schema_version") == str(SCHEMA_VERSION) == "4"
+        assert get_meta(conn, "schema_version") == str(SCHEMA_VERSION) == "5"
         conn.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
     finally:
         conn.close()
@@ -320,7 +320,7 @@ def test_schema_version_mismatch_forces_rebuild(lib):
     assert (stats.added, stats.unchanged) == (2, 0)
     conn = connect(lib)
     try:
-        assert get_meta(conn, "schema_version") == "4"
+        assert get_meta(conn, "schema_version") == str(SCHEMA_VERSION)
     finally:
         conn.close()
     stats = index_library(lib, FakeEmbedder(), log=_quiet)
@@ -366,7 +366,7 @@ def test_old_db_without_kind_is_migrated(lib):
     assert _count(lib, "SELECT count(*) FROM docs WHERE kind = 'ipynb'") == 1
     assert _count(lib, "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'stale'") == 0
     assert _count(lib, "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'armijo'") == 1
-    assert _count(lib, "SELECT value FROM meta WHERE key = 'schema_version'") == "4"
+    assert _count(lib, "SELECT value FROM meta WHERE key = 'schema_version'") == str(SCHEMA_VERSION)
     assert int(_count(lib, "SELECT value FROM meta WHERE key = 'generation'")) > 5
 
 
@@ -432,9 +432,9 @@ def test_v2_db_with_unfolded_fts_is_migrated(lib):
     assert _count(lib, "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'delta'") == 0
     logs = []
     stats = index_library(lib, FakeEmbedder(), log=logs.append)
-    assert any("schema version 2 → 4" in m for m in logs)
+    assert any(f"schema version 2 → {SCHEMA_VERSION}" in m for m in logs)
     assert (stats.added, stats.unchanged) == (1, 0)
-    assert _count(lib, "SELECT value FROM meta WHERE key = 'schema_version'") == "4"
+    assert _count(lib, "SELECT value FROM meta WHERE key = 'schema_version'") == str(SCHEMA_VERSION)
     assert _count(lib, "SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'delta'") == 1
 
 

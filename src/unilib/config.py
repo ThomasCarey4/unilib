@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import glob
 import os
 import re
@@ -144,6 +145,52 @@ def module_by_code(root: Path, code: str) -> Module:
         if m.code.upper() == code.upper():
             return m
     raise KeyError(f"unknown module {code!r}")
+
+
+@dataclass(frozen=True)
+class SourceMeta:
+    """Where a library file came from, from <library>/sources.toml (or a markdown file's frontmatter)."""
+    version: str | None = None     # e.g. "PostgreSQL 16.10": shown in every citation of the file
+    source_url: str | None = None
+    licence: str | None = None
+    superseded: bool = False       # an older version kept for reference: excluded from search by default
+
+
+_SOURCE_KEYS = {"files", "version", "source_url", "licence", "fetched", "sha256", "superseded", "notes"}
+
+
+def load_sources(root: Path) -> list[tuple[tuple[str, ...], SourceMeta]]:
+    """[[source]] entries of <root>/sources.toml as (globs relative to root, meta); [] without the file.
+    `fetched`, `sha256` and `notes` are bookkeeping for people and the snapshot tool."""
+    path = root / "sources.toml"
+    if not path.is_file():
+        return []
+    out = []
+    for i, e in enumerate(tomllib.loads(path.read_text()).get("source", []), 1):
+        where = f"sources.toml [[source]] #{i}"
+        if not isinstance(e, dict):
+            raise ValueError(f"{where}: not a table")
+        if unknown := set(e) - _SOURCE_KEYS:
+            raise ValueError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}")
+        files = e.get("files")
+        if isinstance(files, str):
+            files = [files]
+        if not files or not all(isinstance(f, str) and f for f in files):
+            raise ValueError(f"{where}: needs files = [\"<glob relative to the library>\", …]")
+        if not isinstance(e.get("superseded", False), bool):
+            raise ValueError(f"{where}: superseded must be true or false")
+        meta = SourceMeta(*(str(e[k]) if e.get(k) is not None else None for k in ("version", "source_url", "licence")),
+                          superseded=e.get("superseded", False))
+        out.append((tuple(files), meta))
+    return out
+
+
+def source_meta(entries: list[tuple[tuple[str, ...], SourceMeta]], rel: str) -> SourceMeta:
+    """The first entry whose glob matches the library-relative path, else empty metadata."""
+    for globs, meta in entries:
+        if any(fnmatch.fnmatchcase(rel, g) for g in globs):
+            return meta
+    return SourceMeta()
 
 
 PAPERS = "PAPERS"  # pseudo-module code under which Zotero papers are indexed

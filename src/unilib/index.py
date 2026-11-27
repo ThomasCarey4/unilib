@@ -13,14 +13,16 @@ import numpy as np
 import pymupdf
 
 from .bib import BibEntry, parse_bib, pdf_for
-from .config import PAPERS, Module, PapersConfig, db_path, load_modules, load_papers, paper_rel
+from .config import (PAPERS, Module, PapersConfig, SourceMeta, db_path, load_modules, load_papers, load_sources,
+                     paper_rel, source_meta)
 from .embed import Embedder
-from .markdown import sections as md_sections
+from .markdown import MarkdownError, read as md_read, sections as md_sections
 from .notebook import cell_count, sections
 from .organize import parse_name, read_split_meta, read_split_skip, sha256
 from .textnorm import fold
 
-SCHEMA_VERSION = 4  # 4: docs.citekey/year/authors/reports for Zotero papers (module PAPERS)
+SCHEMA_VERSION = 5  # 5: docs.version/source_url/licence/superseded from sources.toml or frontmatter
+# 4: docs.citekey/year/authors/reports for Zotero papers (module PAPERS)
 # 3: FTS columns hold textnorm.fold(text); chunks.text stays original
 
 SCHEMA = """
@@ -46,7 +48,11 @@ CREATE TABLE IF NOT EXISTS docs(
     citekey TEXT,
     year INTEGER,
     authors TEXT,
-    reports TEXT
+    reports TEXT,
+    version TEXT,
+    source_url TEXT,
+    licence TEXT,
+    superseded INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS chunks(
     id INTEGER PRIMARY KEY,
@@ -86,7 +92,9 @@ class DocStatus:
     title: str
     n_pages: int | None
     state: str  # "indexed" | "stale" | "new" | "deleted"
-    kind: str = "pdf"  # "pdf" | "ipynb"
+    kind: str = "pdf"  # "pdf" | "ipynb" | "md"
+    version: str | None = None
+    superseded: bool = False
 
 
 @dataclass(frozen=True)
@@ -287,15 +295,36 @@ def _prepare_doc(embedder: Embedder, pdf: Path, entry: BibEntry | None = None) -
     return _PreparedDoc(kind, type_, num, title, original, offset, n_pages, rows)
 
 
+def _source_row(src: SourceMeta | None) -> tuple:
+    src = src or SourceMeta()
+    return (src.version, src.source_url, src.licence, int(src.superseded))
+
+
+def doc_source(entries, path: Path, rel: str) -> SourceMeta:
+    """sources.toml metadata for a library file; for markdown, frontmatter fills keys sources.toml leaves unset."""
+    meta = source_meta(entries, rel)
+    if path.suffix.lower() != ".md":
+        return meta
+    try:
+        front, _ = md_read(path)
+    except MarkdownError:
+        return meta
+    pick = lambda k: getattr(meta, k) if getattr(meta, k) is not None else (
+        str(front[k]) if front.get(k) is not None else None)
+    superseded = meta.superseded or front.get("superseded") is True
+    return SourceMeta(pick("version"), pick("source_url"), pick("licence"), superseded)
+
+
 def _write_doc(conn: sqlite3.Connection, module_code: str, rel: str, digest: str,
-               st_mtime: float, st_size: int, prep: _PreparedDoc, meta: _PaperMeta | None = None) -> None:
+               st_mtime: float, st_size: int, prep: _PreparedDoc, meta: _PaperMeta | None = None,
+               src: SourceMeta | None = None) -> None:
     paper = meta.as_row() if meta else (None, None, None, None)
     doc_id = conn.execute(
         "INSERT INTO docs(path, kind, module, type, num, title, sha256, original_file, page_offset, n_pages,"
-        " indexed_at, mtime, size, citekey, year, authors, reports)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " indexed_at, mtime, size, citekey, year, authors, reports, version, source_url, licence, superseded)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (rel, prep.kind, module_code, prep.type, prep.num, prep.title, digest, prep.original_file, prep.page_offset,
-         prep.n_pages, datetime.now(timezone.utc).isoformat(), st_mtime, st_size, *paper),
+         prep.n_pages, datetime.now(timezone.utc).isoformat(), st_mtime, st_size, *paper, *_source_row(src)),
     ).lastrowid
     for page, text, no_text, emb in prep.rows:
         cid = conn.execute(
@@ -312,6 +341,7 @@ def _write_doc(conn: sqlite3.Connection, module_code: str, rel: str, digest: str
 def index_library(root: Path, embedder: Embedder, full: bool = False,
                   log: Callable[[str], None] = print) -> IndexStats:
     modules = load_modules(root)
+    sources = load_sources(root)  # before opening the DB: a bad sources.toml stops the run
     conn = connect(root)
     try:
         stored = (get_meta(conn, "model"), get_meta(conn, "dim"))
@@ -357,7 +387,8 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
             _bump_generation(conn)
 
         existing = {r["path"]: r for r in conn.execute(
-            "SELECT id, path, module, sha256, mtime, size, title, citekey, year, authors, reports FROM docs")}
+            "SELECT id, path, module, sha256, mtime, size, title, citekey, year, authors, reports,"
+            " version, source_url, licence, superseded FROM docs")}
         stats, seen = IndexStats(), set()
 
         def sync_meta(old: sqlite3.Row, meta: _PaperMeta | None) -> None:
@@ -367,8 +398,17 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                     "UPDATE docs SET citekey = ?, year = ?, authors = ?, reports = ? WHERE id = ?",
                     (*meta.as_row(), old["id"])))
 
+        def sync_source(old: sqlite3.Row, src: SourceMeta | None) -> None:
+            """sources.toml/frontmatter metadata changes without the file changing: update in place."""
+            row = _source_row(src)
+            if (old["version"], old["source_url"], old["licence"], old["superseded"]) != row:
+                in_savepoint(lambda: conn.execute(
+                    "UPDATE docs SET version = ?, source_url = ?, licence = ?, superseded = ? WHERE id = ?",
+                    (*row, old["id"])))
+
         def index_one(path: Path, rel: str, module_code: str,
-                      entry: BibEntry | None = None, meta: _PaperMeta | None = None) -> None:
+                      entry: BibEntry | None = None, meta: _PaperMeta | None = None,
+                      src: SourceMeta | None = None) -> None:
             seen.add(rel)  # even if it fails below, so its previous entry is kept
             old = existing.get(rel)
             try:
@@ -376,6 +416,7 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                 same_title = entry is None or (old is not None and old["title"] == _paper_title(entry, path))
                 if old is not None and same_title and (old["mtime"], old["size"]) == (st.st_mtime, st.st_size):
                     sync_meta(old, meta)
+                    sync_source(old, src)
                     stats.unchanged += 1
                     return
                 digest = sha256(path)
@@ -384,6 +425,7 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                         "UPDATE docs SET mtime = ?, size = ? WHERE id = ?",
                         (st.st_mtime, st.st_size, old["id"])))
                     sync_meta(old, meta)
+                    sync_source(old, src)
                     stats.unchanged += 1
                     return
                 prep = _prepare_doc(embedder, path, entry)
@@ -391,7 +433,7 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                 def write() -> None:
                     if old is not None:
                         _delete_doc(conn, old["id"])
-                    _write_doc(conn, module_code, rel, digest, st.st_mtime, st.st_size, prep, meta)
+                    _write_doc(conn, module_code, rel, digest, st.st_mtime, st.st_size, prep, meta, src)
                     _bump_generation(conn)
 
                 in_savepoint(write)
@@ -410,7 +452,8 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
 
         for module in modules:
             for pdf in module_docs(root, module):
-                index_one(pdf, pdf.relative_to(root).as_posix(), module.code)
+                rel = pdf.relative_to(root).as_posix()
+                index_one(pdf, rel, module.code, src=doc_source(sources, pdf, rel))
 
         papers = load_papers(root)
         if papers is not None:
@@ -457,8 +500,9 @@ def library_status(root: Path) -> list[DocStatus]:
         try:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)")}
             kind = "kind" if "kind" in cols else "'pdf' AS kind"  # pre-migration DBs lack the column
+            src = "version, superseded" if "version" in cols else "NULL AS version, 0 AS superseded"
             indexed = {r["path"]: r for r in conn.execute(
-                f"SELECT path, {kind}, module, type, num, title, n_pages, mtime, size FROM docs").fetchall()}
+                f"SELECT path, {kind}, module, type, num, title, n_pages, mtime, size, {src} FROM docs").fetchall()}
         finally:
             conn.close()
     out = []
@@ -468,14 +512,15 @@ def library_status(root: Path) -> list[DocStatus]:
             rel = pdf.relative_to(root).as_posix()
             type_, num, title = parse_name(pdf.name)
             row = indexed.get(rel)
+            version, superseded = None, False
             if row is None:
                 state, n_pages = "new", None
             else:
                 st = pdf.stat()
                 state = "indexed" if (row["mtime"], row["size"]) == (st.st_mtime, st.st_size) else "stale"
-                n_pages = row["n_pages"]
+                n_pages, version, superseded = row["n_pages"], row["version"], bool(row["superseded"])
             on_disk.add(rel)
-            out.append(DocStatus(rel, module.code, type_, num, title, n_pages, state, _kind(pdf)))
+            out.append(DocStatus(rel, module.code, type_, num, title, n_pages, state, _kind(pdf), version, superseded))
     for rel, row in indexed.items():
         if rel not in on_disk and row["module"] != PAPERS:
             out.append(DocStatus(rel, row["module"], row["type"], row["num"], row["title"],

@@ -106,7 +106,7 @@ def eng(tmp_path, monkeypatch, doc):
 def test_markdown_indexed_and_cited_by_section(eng):
     hits = search(eng, FakeEmbedder(), "compress_orderby derived")
     assert hits and hits[0].kind == "md"
-    assert hits[0].cite() == "TSDB/D01_Compression-Settings.md §2"
+    assert hits[0].cite() == "TSDB/D01_Compression-Settings.md §2 [TimescaleDB 2.22]"
 
 
 def test_get_page_markdown_section(eng, monkeypatch):
