@@ -3,13 +3,14 @@ from __future__ import annotations
 import difflib
 import re
 import threading
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
 
-from .config import db_path
+from .config import db_path, load_library_settings
 from .embed import Embedder
 from .index import connect, get_meta
 from .rerank import Reranker
@@ -211,15 +212,24 @@ def _rerank(conn, reranker: Reranker, query: str, ordered: list[int], n: int) ->
     return sorted(head, key=by_score.__getitem__, reverse=True) + ordered[n:]
 
 
+def _books_default(root: Path) -> bool:
+    try:
+        return load_library_settings(root).books_default
+    except (OSError, tomllib.TOMLDecodeError, ValueError):
+        return False
+
+
 def search(root: Path, embedder: Embedder, query: str, module: str | None = None,
            k: int = 8, pool: int = 50, *, citekey: str | None = None, report: str | None = None,
-           books: bool = False, config: RankConfig | None = None,
+           books: bool | None = None, config: RankConfig | None = None,
            reranker: Reranker | None = None, rerank_n: int | None = None) -> list[Hit]:
     """Hybrid BM25 + vector search fused by RRF. With `config.rerank` and a `reranker`,
     the top `rerank_n` (default RERANK_N) fused candidates are reordered by cross-encoder
-    score before pages are deduplicated, collapsed and cut to k. Reading-list book parts
-    (type B) are excluded unless `books`."""
+    score before pages are deduplicated, collapsed and cut to k. Book parts (type B) are
+    excluded unless `books`; None means the library's `[library] books_default` (False if unset)."""
     config = config or DEFAULT_RANK
+    if books is None:
+        books = _books_default(root)
     k = max(1, min(int(k), MAX_K))
     if not _tokens(fold(query)):  # a lone symbol like ∇ still folds to a keyword
         return []

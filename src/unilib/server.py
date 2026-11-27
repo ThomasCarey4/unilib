@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import functools
 import sqlite3
 import threading
 import tomllib
 from pathlib import Path
+from typing import Callable
 
 import pymupdf
 from mcp.server.mcpserver import Image, MCPServer
 
-from .config import PAPERS, db_path, library_root, load_modules, load_papers, paper_file
+from .config import (PAPERS, Library, db_path, libraries, library_root, load_library_settings, load_modules,
+                     load_papers, paper_file, using_library)
 from .embed import Embedder
 from .index import connect, library_status, paper_status
 from .organize import parse_name
@@ -24,19 +27,71 @@ from .search import search as run_search
 NOT_INDEXED = "Library not indexed — run `unilib index`."
 DB_BUSY = "Index is being built or is unavailable — try again shortly / run `unilib index`."
 
-mcp = MCPServer(
-    "unilib",
-    instructions=(
-        "Library of the user's university lecture slides and, under module PAPERS, the research papers "
-        "in their Zotero 'Uni' collection. Call `search` first, cite results verbatim (`path p.N` for "
-        "slides, `@citekey p.N` for papers), and call `get_page` to see equations and diagrams on the "
-        "rendered page before relying on garbled text. To verify a LaTeX citation, search the claim with "
-        "`citekey=`. Bibliography checks and Zotero actions are in the separate `unilib-local` server."
-        " Reading-list textbook chapters (files B…) are excluded from search unless `books=True`."
-        " To add files, follow the /ingest skill: ingest_list, ingest_peek, then ingest_place/ingest_split"
-        " only after the user approves, then index."
-    ),
+UNI_INSTRUCTIONS = (
+    "Library of the user's university lecture slides and, under module PAPERS, the research papers "
+    "in their Zotero 'Uni' collection. Call `search` first, cite results verbatim (`path p.N` for "
+    "slides, `@citekey p.N` for papers), and call `get_page` to see equations and diagrams on the "
+    "rendered page before relying on garbled text. To verify a LaTeX citation, search the claim with "
+    "`citekey=`. Bibliography checks and Zotero actions are in the separate `unilib-local` server."
+    " Reading-list textbook chapters (files B…) are excluded from search unless `books=True`."
+    " To add files, follow the /ingest skill: ingest_list, ingest_peek, then ingest_place/ingest_split"
+    " only after the user approves, then index."
 )
+
+# The template server: tools register on it, `--stdio` serves it against $UNILIB_ROOT, and
+# build_servers() copies its tools onto one server per library for HTTP.
+mcp = MCPServer("unilib", instructions=UNI_INSTRUCTIONS)
+
+
+def library_instructions(lib: Library) -> str:
+    """The endpoint's instructions: today's uni text for a library without a [library] table,
+    otherwise generated from its modules.toml so the coverage it claims is what is indexed."""
+    try:
+        settings = load_library_settings(lib.root)
+        modules = load_modules(lib.root)
+        papers = load_papers(lib.root)
+    except (OSError, tomllib.TOMLDecodeError, ValueError, KeyError, TypeError):
+        return (f"Library {lib.name!r} of reference documents. Call `list_library` to see what it holds, "
+                "`search` before answering from memory, and cite hits verbatim.")
+    if settings.title is None:
+        return UNI_INSTRUCTIONS
+    shelves = "; ".join(f"{m.code} — {m.name}" + (f" ({', '.join(m.keywords)})" if m.keywords else "")
+                        for m in modules)
+    if papers is not None:
+        shelves += f"; {PAPERS} — research papers (cite `@citekey p.N`)"
+    books = ("Book chapters (files B…) are included by default." if settings.books_default
+             else "Book chapters (files B…) are excluded unless `books=True`.")
+    return (
+        f"{settings.title}. Modules: {shelves}. "
+        "Call `search` before answering questions in these areas from memory, cite hits verbatim "
+        "(`path p.N`, `@citekey p.N`), and call `get_page` to read the full page and see tables or diagrams. "
+        f"{books} Use `list_library` for the full list of documents. "
+        "Quote at most a few lines of any source; paraphrase and cite instead. "
+        "To add documents, follow the /ingest skill and change nothing before the user approves."
+    )
+
+
+def _bound(fn: Callable, root: Path) -> Callable:
+    """`fn` run with `library_root()` = root (tools run in worker threads, so bind inside the call)."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        with using_library(root):
+            return fn(*args, **kwargs)
+    return run
+
+
+def build_servers(libs: list[Library]) -> list[tuple[Library, MCPServer]]:
+    """One MCP server per library with every template tool bound to that library's root.
+    The first is named `unilib` (served at /mcp), the others `unilib-<name>`."""
+    out = []
+    for i, lib in enumerate(libs):
+        m = MCPServer("unilib" if i == 0 else f"unilib-{lib.name}", instructions=library_instructions(lib))
+        for tool in mcp._tool_manager.list_tools():
+            m.add_tool(_bound(tool.fn, lib.root), name=tool.name, title=tool.title,
+                       description=tool.description, annotations=tool.annotations)
+        out.append((lib, m))
+    return out
+
 
 _embedder: Embedder | None = None
 _embedder_lock = threading.Lock()  # tools run in worker threads
@@ -69,8 +124,9 @@ def _get_reranker() -> Reranker | None:
 
 @mcp.tool()
 def search(query: str, module: str | None = None, k: int = 8,
-           citekey: str | None = None, report: str | None = None, books: bool = False) -> str:
-    """Hybrid keyword + semantic search over all lecture slides and Zotero papers (module PAPERS).
+           citekey: str | None = None, report: str | None = None, books: bool | None = None) -> str:
+    """Hybrid keyword + semantic search over this library's documents (slides, book chapters, docs)
+    and its Zotero papers (module PAPERS).
 
     Always returns the k best-ranked hits with no relevance cutoff, so judge
     relevance from the snippets yourself. Each hit starts with a citation
@@ -93,8 +149,9 @@ def search(query: str, module: str | None = None, k: int = 8,
         k: number of results (default 8, max 50)
         citekey: only this paper (module PAPERS), e.g. vaswani2017 — use to check a \\cite{…} claim
         report: only papers in this report's bibliography (names from `list_library`)
-        books: include the modules' reading-list textbook chapters (B… files); off by default —
-            use for background, derivations or worked examples when the slides are thin
+        books: include book chapters (B… files). Default: the library's setting (see the server
+            instructions); in the uni library they are off — turn on for background, derivations
+            or worked examples when the slides are thin
     """
     if not search_mod._tokens(fold(query)):  # a lone symbol like ∇ folds to a keyword
         return "Empty query."
@@ -271,7 +328,10 @@ def main(argv: list[str] | None = None) -> None:
 
     from .serve import DEFAULT_IDLE_EXIT_S, DEFAULT_PORT, serve_http
 
-    p = argparse.ArgumentParser(prog="unilib-mcp", description="unilib MCP server (streamable HTTP at /mcp)")
+    p = argparse.ArgumentParser(
+        prog="unilib-mcp",
+        description="unilib MCP server (streamable HTTP: the first library of $UNILIB_LIBRARIES at /mcp, "
+                    "the others at /<name>/mcp; without it, $UNILIB_ROOT at /mcp)")
     p.add_argument("--stdio", action="store_true", help="serve over stdio instead of HTTP")
     p.add_argument("--host", default="127.0.0.1", help="bind address without socket activation (default %(default)s)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help="(default %(default)s)")
@@ -280,6 +340,11 @@ def main(argv: list[str] | None = None) -> None:
                    help="exit after S idle seconds; 0 never (default $UNILIB_IDLE_EXIT_S or %(default)s)")
     args = p.parse_args(argv)
     if args.stdio:
-        mcp.run()
+        mcp.run()  # one library: $UNILIB_ROOT
     else:
-        serve_http(mcp, args.host, args.port, args.idle_exit or None)
+        try:
+            libs = libraries()
+        except ValueError as e:
+            raise SystemExit(f"unilib-mcp: {e}")
+        serve_http([m for _, m in build_servers(libs)], args.host, args.port, args.idle_exit or None,
+                   names=[lib.name for lib in libs])

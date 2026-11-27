@@ -209,7 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("-k", type=int, default=8)
     s.add_argument("--citekey", help="only papers with this BibTeX citekey")
     s.add_argument("--report", help="only papers cited by this report")
-    s.add_argument("--books", action="store_true", help="include reading-list textbook chapters (type B)")
+    s.add_argument("--books", action=argparse.BooleanOptionalAction, default=None,
+                   help="include book chapters (type B); default: the library's [library] books_default (off)")
     s.add_argument("--no-rerank", action="store_true", help="skip the cross-encoder (no model load)")
     s.set_defaults(func=cmd_search)
 

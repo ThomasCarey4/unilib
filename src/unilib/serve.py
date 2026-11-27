@@ -115,8 +115,42 @@ def read_token() -> str | None:
     return token
 
 
-def serve_http(mcp, host: str, port: int, idle_s: float | None) -> None:
-    """Serve `mcp` on the systemd socket if there is one, else on host:port. idle_s=None never exits."""
+def endpoint_path(index: int, name: str) -> str:
+    """The first library is served at /mcp (unchanged for existing clients), the others at /<name>/mcp."""
+    return "/mcp" if index == 0 else f"/{name}/mcp"
+
+
+def build_app(servers, host: str, names: list[str] | None = None):
+    """One stateless JSON streamable-HTTP app serving each MCP server at its endpoint path.
+
+    `servers` is a list of MCPServer, or of (Library, MCPServer) pairs as server.build_servers returns.
+    Each server's session manager runs for the app's lifetime."""
+    import contextlib
+
+    from starlette.applications import Starlette
+
+    pairs = [s if isinstance(s, tuple) else (None, s) for s in servers]
+    if names is None:
+        names = [lib.name if lib is not None else f"lib{i}" for i, (lib, _) in enumerate(pairs)]
+    routes = []
+    for i, ((_, m), name) in enumerate(zip(pairs, names)):
+        sub = m.streamable_http_app(streamable_http_path=endpoint_path(i, name), stateless_http=True,
+                                    json_response=True, host=host)
+        routes += sub.routes
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        async with contextlib.AsyncExitStack() as stack:
+            for _, m in pairs:
+                await stack.enter_async_context(m.session_manager.run())
+            yield
+
+    return Starlette(routes=routes, lifespan=lifespan)
+
+
+def serve_http(mcp, host: str, port: int, idle_s: float | None, names: list[str] | None = None) -> None:
+    """Serve `mcp` (one MCP server, or a list served at endpoint_path(i, names[i])) on the systemd
+    socket if there is one, else on host:port. idle_s=None never exits."""
     import uvicorn
 
     sock = systemd_socket()
@@ -126,8 +160,8 @@ def serve_http(mcp, host: str, port: int, idle_s: float | None) -> None:
     if token is None and not _is_loopback(sock):
         raise SystemExit("unilib-mcp: set UNILIB_TOKEN_FILE to serve beyond loopback")
     # host="0.0.0.0": no DNS-rebinding Host check; the bearer token guards the endpoint instead.
-    app = mcp.streamable_http_app(stateless_http=True, json_response=True,
-                                  host="127.0.0.1" if token is None else "0.0.0.0")
+    servers = mcp if isinstance(mcp, list) else [mcp]
+    app = build_app(servers, host="127.0.0.1" if token is None else "0.0.0.0", names=names)
     gate = Gate(app, token)
     # Open subscription streams would otherwise hold an idle exit forever.
     server = uvicorn.Server(uvicorn.Config(gate, log_level="warning", timeout_graceful_shutdown=5))
@@ -140,6 +174,7 @@ def serve_http(mcp, host: str, port: int, idle_s: float | None) -> None:
         for t in tasks[1:]:
             t.cancel()
 
-    print(f"unilib-mcp: serving on {sock.getsockname()[:2]}"
+    paths = ", ".join(endpoint_path(i, n) for i, n in enumerate(names or ["uni"] * len(servers)))
+    print(f"unilib-mcp: serving {paths} on {sock.getsockname()[:2]}"
           f"{f', idle exit after {idle_s:.0f} s' if idle_s else ''}", file=sys.stderr)
     asyncio.run(run())
