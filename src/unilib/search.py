@@ -71,6 +71,8 @@ class Hit:
     also_pages: tuple[int, ...] = ()  # near-identical adjacent pages collapsed into this hit
     citekey: str | None = None        # set for Zotero papers (module PAPERS)
     version: str | None = None        # e.g. "PostgreSQL 16.10" (sources.toml / frontmatter)
+    rerank_score: float | None = None  # cross-encoder P(yes) when this hit was in the reranked head
+    library: str | None = None        # set when the hit comes from another library than the caller's
 
     def cite(self) -> str:
         unit = {"ipynb": "cell ", "md": "§"}.get(self.kind, "p.")
@@ -86,7 +88,7 @@ class Hit:
             s += f" (also {', '.join(unit + r for r in _runs(self.also_pages))})"
         if self.version:
             s += f" [{self.version}]"
-        return s
+        return f"{self.library}:{s}" if self.library else s
 
 
 def _runs(pages: tuple[int, ...]) -> list[str]:
@@ -215,11 +217,11 @@ def _embeddings(conn, db: Path, generation: str | None) -> tuple[np.ndarray, np.
     return ids, mat
 
 
-def _rerank(conn, reranker: Reranker, query: str, ordered: list[int], n: int) -> list[int]:
-    """Reorder the first n chunk ids by cross-encoder score; the rest keep fused order."""
+def _rerank(conn, reranker: Reranker, query: str, ordered: list[int], n: int) -> tuple[list[int], dict[int, float]]:
+    """Reorder the first n chunk ids by cross-encoder score; the rest keep fused order. Also returns the scores."""
     head = ordered[:n]
     if not head:
-        return ordered
+        return ordered, {}
     marks = ",".join("?" * len(head))
     rows = {r[0]: f"{r[1]}\n{r[2][:RERANK_CHARS]}" for r in conn.execute(
         f"SELECT c.id, d.title, c.text FROM chunks c JOIN docs d ON d.id = c.doc_id WHERE c.id IN ({marks})", head)}
@@ -227,8 +229,8 @@ def _rerank(conn, reranker: Reranker, query: str, ordered: list[int], n: int) ->
     scores = reranker.score(query, [rows[cid] for cid in head])
     if len(scores) != len(head):
         raise ValueError(f"reranker returned {len(scores)} scores for {len(head)} candidates")
-    by_score = dict(zip(head, scores))
-    return sorted(head, key=by_score.__getitem__, reverse=True) + ordered[n:]
+    by_score = {cid: float(sc) for cid, sc in zip(head, scores)}
+    return sorted(head, key=by_score.__getitem__, reverse=True) + ordered[n:], by_score
 
 
 def _books_default(root: Path) -> bool:
@@ -313,9 +315,10 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
         best_text: list[str] = []  # whitespace-collapsed text of each hit's best-scoring chunk
         seen: set[tuple[str, int]] = set()
         ordered = sorted(scores, key=scores.__getitem__, reverse=True)
+        rr: dict[int, float] = {}
         if config.rerank and reranker is not None:
             try:
-                ordered = _rerank(conn, reranker, query, ordered, RERANK_N if rerank_n is None else rerank_n)
+                ordered, rr = _rerank(conn, reranker, query, ordered, RERANK_N if rerank_n is None else rerank_n)
             except Exception as e:  # a broken reranker must never break search; keep the fused order
                 _state.rerank_error = _short(e)
         for cid in ordered:
@@ -339,7 +342,7 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
                 original_file=r["original_file"],
                 original_page=r["page"] + r["page_offset"] if r["original_file"] else None,
                 snippet=_snippet(r["text"], query), score=round(scores[cid], 4), kind=r["kind"],
-                citekey=r["citekey"], version=r["version"],
+                citekey=r["citekey"], version=r["version"], rerank_score=rr.get(cid),
             ))
             if len(hits) == k:
                 break
@@ -348,3 +351,26 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
         if conn.in_transaction:
             conn.execute("ROLLBACK")
         conn.close()
+
+
+def merge_hits(results: list[tuple[str | None, list[Hit]]], k: int) -> list[Hit]:
+    """Merge per-library hit lists (each in its own ranked order) into one list of k.
+
+    Hits each library's cross-encoder scored come first, by score: P(yes) is absolute, so it compares
+    across corpora where BM25/RRF scores do not. The rest follow, interleaved round-robin by rank.
+    `results` pairs a library label (None for the caller's own, else its name for the citation
+    prefix) with its hits."""
+    k = max(1, min(int(k), MAX_K))
+    labelled = [[replace(h, library=lib) for h in hits] for lib, hits in results]
+    if all(hits and hits[0].rerank_score is not None for hits in labelled if hits):
+        head = sorted((h for hits in labelled for h in hits if h.rerank_score is not None),
+                      key=lambda h: h.rerank_score, reverse=True)
+        tails = [[h for h in hits if h.rerank_score is None] for hits in labelled]
+    else:  # some library was not reranked: scores are not comparable, interleave everything
+        head, tails = [], labelled
+    out = list(head)
+    i = 0
+    while len(out) < k and any(i < len(t) for t in tails):
+        out += [t[i] for t in tails if i < len(t)]
+        i += 1
+    return out[:k]

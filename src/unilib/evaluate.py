@@ -10,7 +10,7 @@ from .config import LESSON_PREFIX, LESSONS
 from .embed import Embedder
 from .models import make_reranker
 from .rerank import Reranker
-from .search import DEFAULT_RANK, RankConfig, search
+from .search import DEFAULT_RANK, RankConfig, merge_hits, search
 
 
 @dataclass(frozen=True)
@@ -73,23 +73,33 @@ def answer_keys(h) -> tuple[str, ...]:
     keys = [h.path]
     if getattr(h, "citekey", None):
         keys.append((LESSON_PREFIX if h.module == LESSONS else "@") + h.citekey)
-    return tuple(keys)
+    lib = getattr(h, "library", None)
+    return tuple(f"{lib}:{k}" for k in keys) if lib else tuple(keys)
 
 
 def evaluate(root: Path, embedder: Embedder, golden: list[GoldenQuery], k: int = 10,
              config: RankConfig | None = None, reranker: Reranker | None = None,
-             rerank_n: int | None = None) -> EvalReport:
+             rerank_n: int | None = None, others: tuple[tuple[str, Path], ...] = ()) -> EvalReport:
     """Rank of the first acceptable hit per query. One untimed warm-up search runs
-    first so lazy model loads and the embedding cache are not counted as latency."""
+    first so lazy model loads and the embedding cache are not counted as latency.
+    With `others` ((name, root) of further libraries), each query searches every library and the
+    hits are merged as `search(library="all")` does; answers name other libraries' hits `name:path:N`."""
     rep = EvalReport()
     if reranker is None and (config or DEFAULT_RANK).rerank:
         reranker = make_reranker()
     opts = dict(k=k, config=config, reranker=reranker, rerank_n=rerank_n)
+    def run(gq):
+        if not others:
+            return search(root, embedder, gq.q, module=gq.module, **opts)
+        results = [(None, search(root, embedder, gq.q, module=gq.module, **opts))]
+        results += [(name, search(r, embedder, gq.q, module=gq.module, **opts)) for name, r in others]
+        return merge_hits(results, k)
+
     if golden:
-        search(root, embedder, golden[0].q, module=golden[0].module, **opts)
+        run(golden[0])
     for gq in golden:
         t0 = time.perf_counter()
-        hits = search(root, embedder, gq.q, module=gq.module, **opts)
+        hits = run(gq)
         dt = time.perf_counter() - t0
         rank = None
         for i, h in enumerate(hits, 1):

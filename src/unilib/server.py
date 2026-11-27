@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+from dataclasses import replace
 import sqlite3
 import threading
 import tomllib
@@ -44,18 +45,34 @@ UNI_INSTRUCTIONS = (
 mcp = MCPServer("unilib", instructions=UNI_INSTRUCTIONS)
 
 
-def library_instructions(lib: Library) -> str:
+def _others_note(others: list[Library]) -> str:
+    if not others:
+        return ""
+    names = []
+    for o in others:
+        try:
+            title = load_library_settings(o.root).title
+        except (OSError, tomllib.TOMLDecodeError, ValueError):
+            title = None
+        names.append(f"{o.name} ({title})" if title else o.name)
+    return (f" Other libraries on this server: {', '.join(names)}. They are not searched unless you pass "
+            "`library=\"<name>\"` or `library=\"all\"`; their hits are cited with the library name as prefix.")
+
+
+def library_instructions(lib: Library, others: list[Library] | None = None) -> str:
     """The endpoint's instructions: today's uni text for a library without a [library] table,
-    otherwise generated from its modules.toml so the coverage it claims is what is indexed."""
+    otherwise generated from its modules.toml so the coverage it claims is what is indexed.
+    `others` (the server's other libraries) are named so cross-library search is discoverable."""
+    note = _others_note(others or [])
     try:
         settings = load_library_settings(lib.root)
         modules = load_modules(lib.root)
         papers = load_papers(lib.root)
     except (OSError, tomllib.TOMLDecodeError, ValueError, KeyError, TypeError):
         return (f"Library {lib.name!r} of reference documents. Call `list_library` to see what it holds, "
-                "`search` before answering from memory, and cite hits verbatim.")
+                "`search` before answering from memory, and cite hits verbatim." + note)
     if settings.title is None:
-        return UNI_INSTRUCTIONS
+        return UNI_INSTRUCTIONS + note
     shelves = "; ".join(f"{m.code} — {m.name}" + (f" ({', '.join(m.keywords)})" if m.keywords else "")
                         for m in modules)
     if papers is not None:
@@ -69,7 +86,17 @@ def library_instructions(lib: Library) -> str:
         f"{books} Use `list_library` for the full list of documents. "
         "Quote at most a few lines of any source; paraphrase and cite instead. "
         "To add documents, follow the /ingest skill and change nothing before the user approves."
+        + (" Project lessons (module LESSONS, cited `lesson:<id> §N`) are the user's own measured findings, "
+           "incidents and decisions; filter them with `project=`." if _has_lessons(lib.root) else "")
+        + note
     )
+
+
+def _has_lessons(root: Path) -> bool:
+    try:
+        return bool(load_lessons(root))
+    except (OSError, tomllib.TOMLDecodeError, ValueError):
+        return False
 
 
 def _bound(fn: Callable, root: Path) -> Callable:
@@ -86,7 +113,8 @@ def build_servers(libs: list[Library]) -> list[tuple[Library, MCPServer]]:
     The first is named `unilib` (served at /mcp), the others `unilib-<name>`."""
     out = []
     for i, lib in enumerate(libs):
-        m = MCPServer("unilib" if i == 0 else f"unilib-{lib.name}", instructions=library_instructions(lib))
+        others = [o for o in libs if o is not lib]
+        m = MCPServer("unilib" if i == 0 else f"unilib-{lib.name}", instructions=library_instructions(lib, others))
         for tool in mcp._tool_manager.list_tools():
             m.add_tool(_bound(tool.fn, lib.root), name=tool.name, title=tool.title,
                        description=tool.description, annotations=tool.annotations)
@@ -126,7 +154,7 @@ def _get_reranker() -> Reranker | None:
 @mcp.tool()
 def search(query: str, module: str | None = None, k: int = 8,
            citekey: str | None = None, report: str | None = None, books: bool | None = None,
-           superseded: bool = False, project: str | None = None) -> str:
+           superseded: bool = False, project: str | None = None, library: str | None = None) -> str:
     """Hybrid keyword + semantic search over this library's documents (slides, book chapters, docs)
     and its Zotero papers (module PAPERS).
 
@@ -159,35 +187,103 @@ def search(query: str, module: str | None = None, k: int = 8,
         project: only lessons of this project (module LESSONS), e.g. serenlink
         superseded: also search documents marked superseded (older versions of a source); a hit's
             `[version]` tag says which version it describes
+        library: another library served by this server, or "all" (default: this endpoint's own).
+            Hits from another library are cited with its name as prefix, e.g. `eng:PG/… p.N`,
+            which get_page accepts as is. Names are listed in the server instructions.
     """
     if not search_mod._tokens(fold(query)):  # a lone symbol like ∇ folds to a keyword
         return "Empty query."
-    root = library_root()
-    if not db_path(root).exists():
-        return NOT_INDEXED
+    targets = _targets(library)
+    if isinstance(targets, str):
+        return targets
     try:
         embedder = _get_embedder()
     except Exception as e:
         return (f"Embedding model unavailable ({type(e).__name__}: {' '.join(str(e).split())[:120]}) — "
                 "run `unilib index` once with network access to download models.")
-    try:
-        hits = run_search(root, embedder, query, module=module, k=k, citekey=citekey,
-                        report=report, books=books, superseded=superseded, project=project,
-                        reranker=_get_reranker())
-    except IndexMismatchError as e:
-        return f"Search unavailable: {e}."
-    except FileNotFoundError:
-        return NOT_INDEXED
-    except sqlite3.DatabaseError:
-        return DB_BUSY
+    results, notes = [], []
+    for label, lib_root in targets:
+        name = f"library {label!r}: " if label else ""
+        if not db_path(lib_root).exists():
+            notes.append(f"{name}{NOT_INDEXED}")
+            continue
+        try:
+            with using_library(lib_root):
+                hits = run_search(lib_root, embedder, query, module=module, k=k, citekey=citekey,
+                                  report=report, books=books, superseded=superseded, project=project,
+                                  reranker=_get_reranker())
+        except IndexMismatchError as e:
+            notes.append(f"{name}Search unavailable: {e}.")
+            continue
+        except FileNotFoundError:
+            notes.append(f"{name}{NOT_INDEXED}")
+            continue
+        except sqlite3.DatabaseError:
+            notes.append(f"{name}{DB_BUSY}")
+            continue
+        if err := last_rerank_error():
+            notes.append(f"(note: {name}reranker unavailable — {err}; results in fused order)")
+        results.append((label, hits))
+    if len(targets) == 1 and not results:
+        return notes[0]
+    if len(targets) == 1:
+        label, hits = results[0]
+        hits = [replace(h, library=label) for h in hits] if label else hits
+    else:
+        hits = search_mod.merge_hits(results, k)
     if not hits:
-        return f"No results for {query!r}."
+        return "\n".join([f"No results for {query!r}.", *notes])
     out = "\n\n".join(
         f"[{i}] {h.cite()} — {h.module} · {h.title}\n{h.snippet}" for i, h in enumerate(hits, 1)
     )
-    if err := last_rerank_error():
-        out += f"\n\n(note: reranker unavailable — {err}; results in fused order)"
+    if notes:
+        out += "\n\n" + "\n".join(notes)
     return out
+
+
+def _current_library() -> Library:
+    """The library this endpoint serves (the root bound for this call)."""
+    root = library_root()
+    try:
+        libs = libraries()
+    except ValueError:
+        libs = []
+    return next((lib for lib in libs if lib.root == root), Library("uni", root))
+
+
+def _targets(library: str | None) -> list[tuple[str | None, Path]] | str:
+    """(citation prefix or None for this endpoint's own library, root) per library to search, or an error."""
+    current = _current_library()
+    if library is None or library == current.name:
+        return [(None, current.root)]
+    try:
+        libs = libraries()
+    except ValueError as e:
+        return f"Cannot read UNILIB_LIBRARIES: {e}"
+    others = [(lib.name, lib.root) for lib in libs if lib.root != current.root]
+    if library == "all":
+        return [(None, current.root), *others]
+    for name, root in others:
+        if name == library:
+            return [(name, root)]
+    names = ", ".join(lib.name for lib in libs)
+    return f"Unknown library {library!r}; known: {names} (or 'all')."
+
+
+def _split_library(path: str) -> tuple[Path | None, str, str]:
+    """`eng:PG/x.pdf` -> (eng's root, 'PG/x.pdf', 'eng:') when `eng` is another served library;
+    otherwise (None, path, '')."""
+    head, sep, rest = path.partition(":")
+    if not sep or "/" in head:
+        return None, path, ""
+    try:
+        libs = libraries()
+    except ValueError:
+        return None, path, ""
+    for lib in libs:
+        if lib.name == head:
+            return lib.root, rest, f"{head}:"
+    return None, path, ""
 
 
 def _paper_path(citekey: str) -> Path | None:
@@ -243,10 +339,17 @@ def get_page(path: str, page: int, image: bool = True) -> list:
 
     Args:
         path: library-relative PDF/.ipynb/.md path, `@citekey` for a paper or `lesson:<id>` for a
-            lesson, exactly as in a search hit
+            lesson, exactly as in a search hit (with its `<library>:` prefix if it has one)
         page: 1-based page number (PDF), cell number (notebook) or section number (markdown) N from the same hit
         image: include the rendered PNG (default true, PDFs only); false returns text only
     """
+    other, rest, prefix = _split_library(path)
+    if other is not None and other != library_root():
+        with using_library(other):
+            out = get_page(rest, page, image)
+        if out and isinstance(out[0], str) and out[0].startswith(rest):
+            out[0] = prefix + out[0]
+        return out
     if path.startswith(LESSON_PREFIX):
         target = _lesson_path(path.removeprefix(LESSON_PREFIX))
         if target is None:
@@ -294,14 +397,27 @@ def get_page(path: str, page: int, image: bool = True) -> list:
 
 
 @mcp.tool()
-def list_library(module: str | None = None) -> str:
+def list_library(module: str | None = None, library: str | None = None) -> str:
     """List modules (with their classification keywords) and their documents with page counts and
     index state; module PAPERS lists Zotero papers (by @citekey) and the report names usable as
-    search's `report`.
+    search's `report`; module LESSONS lists project lessons (by lesson:<id>).
 
     Args:
         module: optional module code filter, e.g. COMP3002
+        library: another library served by this server, or "all" (default: this endpoint's own)
     """
+    if library is not None and library != _current_library().name:
+        targets = _targets(library)
+        if isinstance(targets, str):
+            return targets
+        if library != "all":
+            with using_library(targets[0][1]):
+                return list_library(module)
+        parts = [list_library(module)]
+        for name, root in targets[1:]:
+            with using_library(root):
+                parts.append(f"== library {name} ==\n" + list_library(module))
+        return "\n\n".join(parts)
     root = library_root()
     try:
         modules = load_modules(root)

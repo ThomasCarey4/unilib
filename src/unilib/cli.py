@@ -11,7 +11,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-from .config import db_path, library_root, load_modules, module_by_code
+from .config import db_path, libraries, library_root, load_modules, module_by_code
 from .models import make_embedder, make_reranker
 from .evaluate import evaluate, load_golden
 from .index import index_library
@@ -152,6 +152,16 @@ def cmd_eval(args, root: Path) -> int:
     rerank = DEFAULT_RANK.rerank and not args.no_rerank
     reranker = make_reranker() if rerank else None
     opts = dict(k=args.k, reranker=reranker, rerank_n=args.rerank_n)
+    if args.library:
+        libs = libraries()
+        others = [(lib.name, lib.root) for lib in libs if lib.root != root]
+        if args.library != "all":
+            others = [o for o in others if o[0] == args.library]
+            if not others:
+                print(f"unknown library {args.library!r}; known: {', '.join(lib.name for lib in libs)}",
+                      file=sys.stderr)
+                return 2
+        opts["others"] = tuple(others)
     if not args.compare:
         print(evaluate(root, embedder, golden, config=replace(DEFAULT_RANK, rerank=rerank), **opts).format())
         return 0
@@ -231,6 +241,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("eval", help="score search against a golden query file")
     s.add_argument("--golden", type=Path, help="query file (default <library>/eval/golden.toml)")
+    s.add_argument("--library", metavar="NAME", help="also search this library of $UNILIB_LIBRARIES (or 'all'), "
+                   "merged as search(library=...) does; answers name its hits NAME:path:N")
     s.add_argument("-k", type=int, default=10)
     s.add_argument("--compare", action="store_true", help="score all 8 A/B/C ranking configs")
     s.add_argument("--rerank-n", type=int, metavar="N", help="fused candidates to rerank")

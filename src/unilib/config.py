@@ -51,7 +51,7 @@ class Library:
 
 
 _LIBRARY_NAME = re.compile(r"[a-z][a-z0-9-]*")
-RESERVED_LIBRARY_NAMES = frozenset({"all"})  # search(library="all") means every library
+RESERVED_LIBRARY_NAMES = frozenset({"all", "lesson", "zotero"})  # "all": every library; the others are path prefixes
 
 
 def libraries() -> list[Library]:
