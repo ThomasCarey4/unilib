@@ -13,12 +13,43 @@ let
   inherit (lib) mkOption types;
   defaultCache = "/var/cache/unilib/models";
 
+  # Every library this server serves: the main one first (/mcp), then extraLibraries (/<name>/mcp).
+  libraries = [
+    {
+      name = cfg.name;
+      dir = cfg.libraryDir;
+      webdavPort = cfg.webdav.port;
+      indexTimer = null;
+      unit = "webdav-unilib";
+    }
+  ]
+  ++ lib.mapAttrsToList (name: l: {
+    inherit name;
+    inherit (l) dir indexTimer;
+    webdavPort = l.webdavPort;
+    unit = "webdav-unilib-${name}";
+  }) cfg.extraLibraries;
+  extra = builtins.tail libraries;
+  davLibraries = builtins.filter (l: l.webdavPort != null) libraries;
+  indexLibraries = builtins.filter (l: l.indexTimer != null) libraries;
+  librariesEnv = lib.concatMapStringsSep "," (l: "${l.name}=${l.dir}") libraries;
+
+  serverEnv = {
+    UNILIB_ROOT = cfg.libraryDir;
+    UNILIB_TOKEN_FILE = cfg.tokenFile;
+    UNILIB_IDLE_EXIT_S = toString cfg.idleExitSeconds;
+    UNILIB_MODEL_CACHE = cfg.modelCacheDir;
+    HF_HOME = "${cfg.modelCacheDir}/hf-home";
+  }
+  // lib.optionalAttrs (extra != [ ]) { UNILIB_LIBRARIES = librariesEnv; }
+  // cfg.environment;
+
   # The base config; at start `unilib webdav-config` adds read rules for each module
   # folder in modules.toml (webdav.readModules) and writes the config webdav uses.
-  davBase = (pkgs.formats.json { }).generate "webdav-unilib-base.json" {
+  davBase = l: (pkgs.formats.json { }).generate "${l.unit}-base.json" {
     address = cfg.webdav.address;
-    port = cfg.webdav.port;
-    directory = cfg.libraryDir;
+    port = l.webdavPort;
+    directory = l.dir;
     permissions = "none";
     users = [
       {
@@ -80,10 +111,50 @@ in
       description = "Library root (modules.toml, module folders, .index/). Exported as UNILIB_ROOT.";
     };
 
+    name = mkOption {
+      type = types.strMatching "[a-z][a-z0-9-]*";
+      default = "uni";
+      description = "Name of the main library (served at /mcp); used by search(library=…) from other libraries.";
+    };
+
+    extraLibraries = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            dir = mkOption {
+              type = types.str;
+              example = "/home/alice/Documents/EngLibrary";
+              description = "Library root (modules.toml, module folders, sources.toml, .index/).";
+            };
+            webdavPort = mkOption {
+              type = types.nullOr types.port;
+              default = null;
+              description = "Port of a WebDAV share of this library (same rules and user as webdav); null: none.";
+            };
+            indexTimer = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "daily";
+              description = ''
+                systemd OnCalendar= for a periodic `unilib index` of this library, e.g. to pick up
+                project lessons pulled into their repos; null: index only on demand.
+              '';
+            };
+          };
+        }
+      );
+      default = { };
+      example = lib.literalExpression ''{ eng = { dir = "/home/alice/Documents/EngLibrary"; webdavPort = 8092; indexTimer = "daily"; }; }'';
+      description = ''
+        Further libraries served by the same process (sharing its models), each at
+        http://host:port/<name>/mcp. Exported as UNILIB_LIBRARIES.
+      '';
+    };
+
     port = mkOption {
       type = types.port;
       default = 8095;
-      description = "TCP port of the socket; the MCP endpoint is http://host:port/mcp.";
+      description = "TCP port of the socket; the MCP endpoint is http://host:port/mcp (extra libraries: /<name>/mcp).";
     };
 
     idleExitSeconds = mkOption {
@@ -194,10 +265,19 @@ in
         };
         users.groups = lib.mkIf (cfg.group == "unilib") { unilib = { }; };
 
-        systemd.tmpfiles.rules = [
-          "d ${cfg.libraryDir}/_ingest 0755 ${cfg.user} ${cfg.group} -"
-          "d ${cfg.libraryDir}/_unsorted 0755 ${cfg.user} ${cfg.group} -"
-        ]
+        assertions = [
+          {
+            assertion = !(builtins.elem cfg.name (builtins.attrNames cfg.extraLibraries))
+              && lib.all (n: !(builtins.elem n [ "all" "lesson" "zotero" ])) (map (l: l.name) libraries);
+            message = "services.unilib: library names must be unique and not all, lesson or zotero";
+          }
+        ];
+
+        systemd.tmpfiles.rules =
+          lib.concatMap (l: [
+            "d ${l.dir}/_ingest 0755 ${cfg.user} ${cfg.group} -"
+            "d ${l.dir}/_unsorted 0755 ${cfg.user} ${cfg.group} -"
+          ]) libraries
         ++ lib.optional (cfg.modelCacheDir != defaultCache) "d ${cfg.modelCacheDir} 0755 ${cfg.user} ${cfg.group} -";
 
         systemd.sockets.unilib = {
@@ -211,60 +291,107 @@ in
           requires = [ "unilib.socket" ];
           after = [ "unilib.socket" ];
           path = lib.optional (cfg.convert.package != null) cfg.convert.package;
-          environment = {
-            UNILIB_ROOT = cfg.libraryDir;
-            UNILIB_TOKEN_FILE = cfg.tokenFile;
-            UNILIB_IDLE_EXIT_S = toString cfg.idleExitSeconds;
-            UNILIB_MODEL_CACHE = cfg.modelCacheDir;
-            HF_HOME = "${cfg.modelCacheDir}/hf-home";
-          }
-          // cfg.environment;
+          environment = serverEnv;
           serviceConfig = hardening // {
             User = cfg.user;
             Group = cfg.group;
             ExecStart = "${cfg.package}/bin/unilib-mcp";
             Restart = "no"; # an idle exit is normal; the socket starts it again
-            ReadWritePaths = [ cfg.libraryDir ] ++ lib.optional (cfg.modelCacheDir != defaultCache) cfg.modelCacheDir ++ cfg.readWritePaths;
+            ReadWritePaths = map (l: l.dir) libraries ++ lib.optional (cfg.modelCacheDir != defaultCache) cfg.modelCacheDir ++ cfg.readWritePaths;
             CacheDirectory = lib.mkIf (cfg.modelCacheDir == defaultCache) "unilib/models";
           };
         };
       }
 
       (lib.mkIf cfg.webdav.enable {
-        systemd.services.webdav-unilib = {
-          description = "WebDAV share of the unilib library (ingest drop zone)";
-          wantedBy = [ "multi-user.target" ];
-          after = [ "network.target" ];
-          environment.UNILIB_ROOT = cfg.libraryDir;
-          serviceConfig = hardening // {
-            User = cfg.user;
-            Group = cfg.group;
-            EnvironmentFile = cfg.webdav.environmentFile;
-            RuntimeDirectory = "webdav-unilib";
-            ExecStartPre =
-              if cfg.webdav.readModules then
-                "${cfg.package}/bin/unilib webdav-config ${davBase} %t/webdav-unilib/config.json"
-              else
-                "${pkgs.coreutils}/bin/cp ${davBase} %t/webdav-unilib/config.json";
-            ExecStart = "${lib.getExe pkgs.webdav} -c %t/webdav-unilib/config.json";
-            Restart = "on-failure";
-            ReadWritePaths = [ "${cfg.libraryDir}/_ingest" ];
-          };
-        };
+        # Keys are fixed here and only their values depend on the library list: a config-dependent
+        # mkMerge at the top would make the module system evaluate cfg to find what it defines.
+        systemd.services = lib.listToAttrs (
+          lib.concatMap (l: [
+            {
+              name = l.unit;
+              value = {
+                description = "WebDAV share of the unilib library ${l.name} (ingest drop zone)";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "network.target" ];
+                environment.UNILIB_ROOT = l.dir;
+                serviceConfig = hardening // {
+                  User = cfg.user;
+                  Group = cfg.group;
+                  EnvironmentFile = cfg.webdav.environmentFile;
+                  RuntimeDirectory = l.unit;
+                  ExecStartPre =
+                    if cfg.webdav.readModules then
+                      "${cfg.package}/bin/unilib webdav-config ${davBase l} %t/${l.unit}/config.json"
+                    else
+                      "${pkgs.coreutils}/bin/cp ${davBase l} %t/${l.unit}/config.json";
+                  ExecStart = "${lib.getExe pkgs.webdav} -c %t/${l.unit}/config.json";
+                  Restart = "on-failure";
+                  ReadWritePaths = [ "${l.dir}/_ingest" ];
+                };
+              };
+            }
+          ]
+          ++ lib.optional cfg.webdav.readModules {
+            name = "${l.unit}-modules";
+            value = {
+              description = "Restart ${l.unit} after modules.toml changes";
+              serviceConfig = {
+                Type = "oneshot";
+                ExecStart = "${pkgs.systemd}/bin/systemctl try-restart ${l.unit}.service";
+              };
+            };
+          }) davLibraries
+        );
 
         # Module folders come from modules.toml: pick up added or renamed modules.
-        systemd.paths.webdav-unilib-modules = lib.mkIf cfg.webdav.readModules {
-          wantedBy = [ "paths.target" ];
-          pathConfig.PathChanged = "${cfg.libraryDir}/modules.toml";
-        };
-        systemd.services.webdav-unilib-modules = lib.mkIf cfg.webdav.readModules {
-          description = "Restart webdav-unilib after modules.toml changes";
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = "${pkgs.systemd}/bin/systemctl try-restart webdav-unilib.service";
-          };
-        };
+        systemd.paths = lib.mkIf cfg.webdav.readModules (
+          lib.listToAttrs (
+            map (l: {
+              name = "${l.unit}-modules";
+              value = {
+                wantedBy = [ "paths.target" ];
+                pathConfig.PathChanged = "${l.dir}/modules.toml";
+              };
+            }) davLibraries
+          )
+        );
       })
+
+      {
+        # Periodic re-index of a library (lessons live in project repos, outside the library).
+        systemd.services = lib.listToAttrs (
+          map (l: {
+            name = "unilib-index-${l.name}";
+            value = {
+              description = "unilib index of the ${l.name} library";
+              environment = serverEnv // { UNILIB_ROOT = l.dir; };
+              serviceConfig = hardening // {
+                Type = "oneshot";
+                User = cfg.user;
+                Group = cfg.group;
+                ExecStart = "${cfg.package}/bin/unilib index";
+                ReadWritePaths = [ l.dir ] ++ lib.optional (cfg.modelCacheDir != defaultCache) cfg.modelCacheDir ++ cfg.readWritePaths;
+                CacheDirectory = lib.mkIf (cfg.modelCacheDir == defaultCache) "unilib/models";
+                Nice = 10;
+              };
+            };
+          }) indexLibraries
+        );
+        systemd.timers = lib.listToAttrs (
+          map (l: {
+            name = "unilib-index-${l.name}";
+            value = {
+              wantedBy = [ "timers.target" ];
+              timerConfig = {
+                OnCalendar = l.indexTimer;
+                Persistent = true;
+                RandomizedDelaySec = "30m";
+              };
+            };
+          }) indexLibraries
+        );
+      }
     ]
   );
 }

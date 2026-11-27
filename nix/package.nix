@@ -68,7 +68,7 @@ python3Packages.buildPythonApplication {
 
   postInstall = ''
     mkdir -p $out/share/unilib/skills
-    cp -r skills/ingest $out/share/unilib/skills/
+    cp -r skills/ingest skills/lesson $out/share/unilib/skills/
   ''
   + lib.optionalString (!server) ''
     rm $out/bin/unilib $out/bin/unilib-mcp
