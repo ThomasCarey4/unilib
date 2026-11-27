@@ -300,7 +300,7 @@ def test_list_library_papers_section(lib, tmp_path):
 def test_central_server_has_no_local_tools():
     names = {t.name for t in asyncio.run(server.mcp.list_tools())}
     assert names == {"search", "get_page", "list_library", "ingest_list", "ingest_peek", "ingest_outline",
-                     "ingest_convert", "ingest_place", "ingest_split", "ingest_unsort", "index"}
+                     "ingest_convert", "ingest_place", "ingest_split", "ingest_unsort", "ingest_snapshot", "index"}
 
 
 def test_list_library_paper_status_oserror(lib, tmp_path, monkeypatch):

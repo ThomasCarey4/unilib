@@ -1,17 +1,23 @@
 ---
 name: ingest
-description: Import lecture slides, notebooks and reading-list books dropped into the unilib server's _ingest/ folder — classify each file by module, rename it, split large combined decks, and index, all through the unilib MCP tools. Use when the user says "ingest", "/ingest", or asks to add slides to their uni library.
+description: Import lecture slides, notebooks, books, reference docs and web/git snapshots into a unilib library (the uni library or the engineering library) through its _ingest/ folder — classify each file by module, rename it, split large combined decks and books, and index, all through the unilib MCP tools. Use when the user says "ingest", "/ingest", or asks to add slides, books or reference docs to a library.
 ---
 
 # Ingest slides and notebooks into the library
 
-Everything runs on the unilib server through its MCP tools (`ingest_list`, `ingest_peek`, `ingest_outline`, `ingest_convert`, `ingest_place`, `ingest_split`, `ingest_unsort`, `index`, `list_library`). File names are relative to the server's `_ingest/` drop zone. Users put files there over WebDAV (a file manager, or `unilib-client drop FILE…`).
+Everything runs on the unilib server through its MCP tools (`ingest_list`, `ingest_peek`, `ingest_outline`, `ingest_convert`, `ingest_place`, `ingest_split`, `ingest_unsort`, `ingest_snapshot`, `index`, `list_library`). File names are relative to the library's `_ingest/` drop zone. Users put files there over WebDAV (a file manager, or `unilib-client drop FILE…`).
+
+**Which library:** each library has its own MCP server and drop zone: `unilib` for the uni library, `unilib-eng` for the engineering references. Use the tools of the library being added to; never mix them in one run.
 
 If the unilib tools are unavailable (the server is unreachable), stop and tell the user.
 
 ## Steps
 
-1. **List the drop zone:** `ingest_list`. Files go in as PDF, PPTX or `.ipynb`. If it's empty, tell the user and stop.
+0. **Web and git sources** (engineering library): when the user asks to add a web page, online docs or a spec, run `ingest_snapshot` with no `id` to list the `[[snapshot]]` entries of `sources.toml`.
+   - If the source is listed, run `ingest_snapshot(id)`. It writes `_ingest/<id>/`: one PDF, or markdown files with `version`/`licence` frontmatter.
+   - If it is not listed, stop and show the user a proposed `[[snapshot]]` entry (mode `pdf`, `git` with a pinned `ref` and `paths`, or `html` with `urls`; plus `version` and `licence`) to add to `sources.toml` themselves. The tools never write `sources.toml`.
+   - Pin versions: a git `ref` is a release tag or commit matching the version the user runs, never a branch.
+1. **List the drop zone:** `ingest_list`. Files go in as PDF, PPTX, `.ipynb` or `.md`. If it's empty, tell the user and stop.
 2. **Convert PPTX:** run `ingest_convert` for each `*.pptx`. On failure the file moves to `_unsorted/`; report it. If the PDF already exists, the tool reports `already converted:` and does nothing.
 3. **Classify each PDF or notebook:** run `ingest_peek`. It returns the first pages' text plus a page-1 image. Look at the image when the text is thin or garbled. For a `.ipynb` it returns the cell count and the first 3 sections, with no image. Decide:
    - **Module code:** from `list_library`, which lists the codes, names and classification keywords.
@@ -22,11 +28,14 @@ If the unilib tools are unavailable (the server is unreachable), stop and tell t
      - `N` notes
      - `E` example notebook (`.ipynb` only)
      - `X` other
-     - `B` reading-list textbook chapter (PDF only)
+     - `B` reading-list textbook chapter (PDF only); in the engineering library, any book chapter
+     - `D` reference documentation, a spec or an RFC (PDF or `.md`)
    - **`B` signals:** an ISBN/copyright page, PDF author/title metadata, more than 200 pages with a chapter outline, or the user calling it a reading-list book. Books are background material and are searched only with `books=True`.
    - **Number and title:** take the number from "Lecture 3", "Week 3", the file name, or date order. Give a short title (2–5 words). For a notebook, use the related unit/lecture number when it's evident (from the title, a markdown heading or the file name); otherwise use the next free `E` number in that module (see `list_library`).
    - **Not confident:** *plan* the destination `_unsorted/` and show it in the table.
-4. **Large decks** (over 60 pages, PDF only; notebooks can't be outlined or split):
+   - **Markdown (`.md`):** `ingest_peek` shows its frontmatter and first sections. Snapshot output is `D`; number the files in the module's next free `D` numbers.
+   - **Versions:** a PDF of versioned docs or a spec needs a `[[source]]` entry in `sources.toml` (`files`, `version`, `licence`) for its citations to carry the version. List the entries the user should add in the step-5 table's Notes; markdown snapshots carry it already.
+4. **Large decks** (over 60 pages, PDF only; notebooks and markdown can't be outlined or split):
    - Run `ingest_outline` and propose parts `START-END:TYPE:NN:Title` at lecture boundaries (bookmarks, `*TITLE*` pages, "Lecture N").
    - If a boundary is ambiguous, look only at the candidate boundary pages (`ingest_peek` with `pages=0, render=N`).
    - With 2+ large decks, dispatch one native Claude subagent per deck (not agy) to propose its parts, then review their proposals.

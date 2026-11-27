@@ -171,6 +171,30 @@ def cmd_eval(args, root: Path) -> int:
     return 0
 
 
+def cmd_snapshot(args, root: Path) -> int:
+    from .snapshot import load_snapshots, load_state, run_snapshot
+    if not args.id:
+        state = load_state(root)
+        snaps = load_snapshots(root)
+        if not snaps:
+            print("no [[snapshot]] entries in sources.toml")
+        for sn in snaps:
+            st = state.get(sn.id)
+            when = f"fetched {st['fetched']}, {len(st['files'])} files" if st else "not fetched"
+            print(f"{sn.id} · {sn.mode} · {sn.version or 'no version'} · {when}")
+        return 0
+    try:
+        files = run_snapshot(root, args.id, refresh=args.refresh)
+    except FileExistsError as e:
+        print(e, file=sys.stderr)
+        return 1
+    for f in files:
+        print(f.relative_to(root / "_ingest"))
+    print("next: /ingest them (ingest_peek, then ingest_place with type D after approval). PDFs need a "
+          "[[source]] entry in sources.toml for their version; markdown carries it in its frontmatter.")
+    return 0
+
+
 def cmd_webdav_config(args, root: Path) -> int:
     """Copy a WebDAV server config (JSON), giving its users read access to each module folder
     in modules.toml: the module's NixOS service runs this before WebDAV starts."""
@@ -238,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--superseded", action="store_true", help="also search documents marked superseded in sources.toml")
     s.add_argument("--no-rerank", action="store_true", help="skip the cross-encoder (no model load)")
     s.set_defaults(func=cmd_search)
+
+    s = sub.add_parser("snapshot", help="fetch a [[snapshot]] source from sources.toml into _ingest/<id>/")
+    s.add_argument("id", nargs="?", help="snapshot id (omit to list them)")
+    s.add_argument("--refresh", action="store_true", help="fetch again although it was fetched before")
+    s.set_defaults(func=cmd_snapshot)
 
     s = sub.add_parser("eval", help="score search against a golden query file")
     s.add_argument("--golden", type=Path, help="query file (default <library>/eval/golden.toml)")

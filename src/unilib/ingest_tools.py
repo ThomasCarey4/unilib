@@ -198,3 +198,19 @@ def index(full: bool = False) -> str:
     out = (f"added {s.added}, updated {s.updated}, removed {s.removed}, unchanged {s.unchanged}, "
            f"pages indexed {s.pages}, errors {s.errors}")
     return "\n".join([out, *notes[:30]] + ([f"… {len(notes) - 30} more"] if len(notes) > 30 else []))
+
+
+@mcp.tool()
+def ingest_snapshot(id: str | None = None, refresh: bool = False) -> str:
+    """Fetch a web or git source listed as [[snapshot]] in the library's sources.toml into
+    `_ingest/<id>/` (PDF download, a git repo's markdown at a pinned ref grouped into documents,
+    or HTML pages converted to markdown). Without `id`, lists the snapshots and when each was fetched.
+
+    The fetched files then go through the normal /ingest steps (peek, the approval table, place
+    as type D, index). A fetched snapshot is not fetched again unless `refresh=True`.
+
+    Args:
+        id: snapshot id from sources.toml
+        refresh: fetch again, replacing the earlier copy in _ingest/<id>/
+    """
+    return _cli("snapshot", *([id] if id else []), *(["--refresh"] if refresh else []))
