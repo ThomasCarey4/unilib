@@ -92,6 +92,7 @@ def test_server_info_and_instructions_per_endpoint(two):
     assert "Engineering references" in eng["instructions"]
     assert "PG — PostgreSQL" in eng["instructions"]
     assert "university" not in eng["instructions"].lower()
+    assert "prefer the one matching the version the project runs, then the newest" in eng["instructions"]
 
 
 def test_unknown_path_is_404(two):
