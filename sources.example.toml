@@ -1,0 +1,41 @@
+# Copy to <library>/sources.toml. Private to the library: it records where each file came from.
+
+# Metadata for library files (globs relative to the library root; the first matching entry wins).
+# The version is shown in every citation of the file; superseded files are searched only on request.
+[[source]]
+files = ["PG/D*_PG16-*.pdf"]
+version = "PostgreSQL 16.10"
+source_url = "https://www.postgresql.org/docs/16/"
+licence = "PostgreSQL"
+fetched = 2026-11-27
+
+[[source]]
+files = ["PG/D*_PG15-*.pdf"]
+version = "PostgreSQL 15.4"
+superseded = true
+
+# Sources to fetch with `unilib snapshot ID` (or the ingest_snapshot tool) into _ingest/ID/.
+[[snapshot]]
+id = "rfc9266"
+mode = "pdf"
+url = "https://www.rfc-editor.org/rfc/rfc9266.pdf"
+version = "RFC 9266"
+licence = "IETF Trust"
+
+[[snapshot]]
+id = "some-docs-1.2"
+mode = "git"                      # a repo's markdown at a pinned tag or commit, never a branch
+url = "https://github.com/example/docs"
+ref = "v1.2.0"
+paths = ["guide/**/*.md"]
+group = 1                         # one document per top-level directory (at most 99)
+version = "Example 1.2"
+licence = "Apache-2.0"
+source_url = "https://github.com/example/docs/blob/v1.2.0"
+
+[[snapshot]]
+id = "a-web-chapter"
+mode = "html"
+urls = ["https://example.org/book/chapter-1/"]
+version = "1st edition"
+licence = "CC BY-NC-ND 4.0"

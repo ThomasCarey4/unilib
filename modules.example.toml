@@ -1,6 +1,12 @@
 # Copy to <library>/modules.toml (the library root is $UNILIB_ROOT, default ~/Documents/UniLibrary).
 # `folder` is the directory name under the library root; keywords help /ingest classify files.
 
+# Optional, for libraries other than the uni one: the endpoint's instructions use the title, and
+# books_default = true searches book chapters (B files) by default. `semester` may then be omitted.
+# [library]
+# title = "Engineering references"
+# books_default = true
+
 [[module]]
 code = "MATH3001"
 name = "Scientific Computation"
@@ -20,3 +26,7 @@ keywords = ["logic", "ontology", "description logic", "resolution"]
 # bib = "~/Zotero/exports/uni.bib"              # Better BibTeX auto-export of the collection
 # reports = "~/Documents/LaTeX/*/refs.bib"      # report bibs; only folders holding .unilib-report count
 # zotero_dir = "~/Zotero"
+
+# Optional: index project lessons (markdown notes in your repos) as module LESSONS.
+# [lessons]
+# globs = ["~/src/*/docs/lessons/*.md"]

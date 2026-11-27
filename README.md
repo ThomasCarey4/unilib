@@ -1,8 +1,8 @@
 # unilib
 
-Search over your lecture slides, notebooks, reading-list textbooks and Zotero papers, served to Claude Code (or any MCP client) from a single machine.
+Search over your lecture slides, notebooks, reading-list textbooks and Zotero papers, served to Claude Code (or any MCP client) from a single machine. The same server can host further libraries, for example engineering references (books, pinned versions of documentation, specs) with your own project lessons, each at its own endpoint.
 
-- **Library:** a plain directory with one folder per module, defined in `modules.toml`. Files are renamed to `<TYPE><NN>_<Title>.pdf|ipynb`, e.g. `L03_Newton-Methods.pdf`. Types: `L` lecture, `T` tutorial/lab, `CW` coursework, `N` notes, `E` example notebook, `X` other, `B` reading-list textbook chapter.
+- **Library:** a plain directory with one folder per module, defined in `modules.toml`. Files are renamed to `<TYPE><NN>_<Title>.pdf|ipynb|md`, e.g. `L03_Newton-Methods.pdf`. Types: `L` lecture, `T` tutorial/lab, `CW` coursework, `N` notes, `E` example notebook, `X` other, `B` reading-list textbook chapter, `D` reference docs/spec (PDF or markdown; markdown is cited by section, `path §N`).
 - **Server** (`unilib-mcp`): indexes the library and serves MCP over streamable HTTP. Its tools are `search`, `get_page`, `list_library`, the ingest tools and `index`.
 - **Client** (`unilib-client`, `unilib-local-mcp`): runs on each machine you work on. It talks to Zotero and your LaTeX reports (`check_bib`, `zotero_sync_report`, `zotero_find`) and uploads new files to the server's drop zone.
 
@@ -97,7 +97,17 @@ programs.unilib-client = {
     register = true;                            # merges unilib + unilib-local into ~/.claude.json
     serverUrl = "http://server:8095/mcp";
     tokenFile = "/run/secrets/unilib-token";    # read at connect time via headersHelper; never stored
+    # Further libraries of the same server, only for sessions in these projects (local scope):
+    extraLibraries.unilib-ref = { url = "http://server:8095/ref/mcp"; projects = [ "/home/me/src/app" ]; };
   };
+  lessonSkill.enable = true;                    # ~/.claude/skills/lesson
+};
+
+# a second library on the same server (shares its models): http://server:8095/ref/mcp
+services.unilib.extraLibraries.ref = {
+  dir = "/srv/reflib";
+  webdavPort = 8092;          # its own _ingest/ share; null for none
+  indexTimer = "daily";       # re-index, e.g. to pick up project lessons
 };
 ```
 
@@ -129,6 +139,24 @@ uv run unilib search "Armijo condition" --module MATH3001
 
 Drop the PDF and run `/ingest`. It's split per chapter (`B01_…`), and exercise pages are kept but not indexed. Books are left out of search unless you pass `books=True` (MCP) or `--books` (CLI).
 
+### Several libraries
+
+`UNILIB_LIBRARIES=uni=/srv/unilib,ref=/srv/reflib` serves the first library at `/mcp` and the others at `/<name>/mcp` from one process. Each library has its own index, `_ingest/`, eval sets and `[papers]`, so their search rankings never mix. Each endpoint's instructions are generated from its `modules.toml`:
+- A `[library]` table sets the `title`, and `books_default = true` searches `B` files by default, for libraries where books are the main material.
+- Without that table, the endpoint keeps the uni wording.
+
+Search stays within the endpoint's library unless you pass `library="<name>"` or `library="all"`. Hits from another library are cited with its name as a prefix (`ref:PG/… p.N`), which `get_page` accepts. With `all`, each library ranks its own hits, and the hits the cross-encoder scored are merged by that score.
+
+### Reference docs, versions and snapshots
+
+`<library>/sources.toml` records where files came from (see `sources.example.toml`):
+- `[[source]]` entries give `files` globs a `version`, `source_url` and `licence`, and can mark older versions `superseded`. Citations then carry the version (`PG/D07_Btree.pdf p.3 [PostgreSQL 16.10]`). Superseded files are left out of search unless you pass `superseded=True`. Markdown frontmatter can carry the same keys.
+- `[[snapshot]]` entries describe a source to fetch: a PDF URL, a git repo's markdown at a pinned ref, or HTML pages, which are converted to markdown. `unilib snapshot ID`, or the `ingest_snapshot` tool, puts the files in `_ingest/<ID>/`, and `/ingest` takes over from there. Snapshots are private copies that stay in the library directory; they are not redistributed.
+
+### Project lessons
+
+`[lessons] globs = ["~/src/*/docs/lessons/*.md"]` indexes markdown notes from your project repos as module `LESSONS`. These are measured findings, incidents and decisions, with frontmatter `id`, `title`, `project`, `kind`, `date`, `versions`, `refs` and `status`; the format is in `src/unilib/lessons.py`, and the `/lesson` skill writes them. They are cited as `lesson:<id> §N`, filtered with `search(project=…)`, and opened with `get_page("lesson:<id>", N)`.
+
 ### Papers and reports
 
 Papers from a Zotero collection are indexed as module `PAPERS` (see `[papers]` in `modules.example.toml`), so `search` and `get_page` (`@citekey`) cover them alongside the slides. You need Zotero with Better BibTeX on each machine, and the collection named "Uni".
@@ -145,6 +173,7 @@ Papers from a Zotero collection are indexed as module `PAPERS` (see `[papers]` i
 | Variable | Default | Purpose |
 |---|---|---|
 | `UNILIB_ROOT` | `~/Documents/UniLibrary` | library root (server) |
+| `UNILIB_LIBRARIES` | unset | `name=path,…`: serve several libraries (first at `/mcp`, others at `/<name>/mcp`) |
 | `UNILIB_TOKEN_FILE` | unset | bearer token for the HTTP server |
 | `UNILIB_IDLE_EXIT_S` | `900` | idle seconds before the server exits; `0` never |
 | `UNILIB_MODEL_CACHE` | `~/.cache/unilib/models` | Hugging Face model cache |

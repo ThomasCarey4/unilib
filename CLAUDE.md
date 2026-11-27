@@ -6,12 +6,12 @@ Machine-specific setup (hosts, paths, how this deployment is wired) is in `CLAUD
 
 ## What this repo is
 
-`unilib` indexes and searches a library of lecture slides, notebooks, reading-list textbook chapters and Zotero papers. The library itself is a separate data directory (`UNILIB_ROOT`, default `~/Documents/UniLibrary`) holding `modules.toml`, one folder per module, and `.index/`. It is never part of this repo.
+`unilib` indexes and searches a library of lecture slides, notebooks, reading-list textbook chapters and Zotero papers. The library itself is a separate data directory (`UNILIB_ROOT`, default `~/Documents/UniLibrary`) holding `modules.toml`, one folder per module, and `.index/`. It is never part of this repo. One server can serve several libraries (`UNILIB_LIBRARIES`), for example a reference library of books, pinned docs, specs and project lessons beside the uni one.
 
 One distribution, two roles:
 
 - **Server** (the `server` extra; the dev group includes it):
-  - `unilib-mcp` serves MCP over stateless streamable HTTP with these tools: `search`, `get_page`, `list_library`, `ingest_list`, `ingest_peek`, `ingest_outline`, `ingest_convert`, `ingest_place`, `ingest_split`, `ingest_unsort` and `index`.
+  - `unilib-mcp` serves MCP over stateless streamable HTTP with these tools: `search`, `get_page`, `list_library`, `ingest_list`, `ingest_peek`, `ingest_outline`, `ingest_convert`, `ingest_place`, `ingest_split`, `ingest_unsort`, `ingest_snapshot` and `index`. Each library gets its own endpoint (first `/mcp`, others `/<name>/mcp`).
   - `unilib` is the server-side CLI.
   - The server is long-running (or socket-activated), so code changes take effect only after it restarts or idles out.
 - **Client** (the base install: stdlib + `mcp`, no torch or pymupdf):
@@ -25,7 +25,7 @@ Nix (`flake.nix`, `nix/`):
 - `nix/client.nix` is the Home Manager module `programs.unilib-client`, which can merge the MCP entries into `~/.claude.json` with a `headersHelper` for the token.
 - `nix build .#unilib` runs the pytest suite (minus slow/eval). After bumping torch in nixpkgs, update the wheel's version and hash.
 
-`skills/ingest/SKILL.md` is the `/ingest` workflow, driven entirely by the server's ingest tools. Follow it exactly: nothing moves before the user approves the table.
+`skills/ingest/SKILL.md` is the `/ingest` workflow, driven entirely by the server's ingest tools. Follow it exactly: nothing moves before the user approves the table. `skills/lesson/SKILL.md` is the `/lesson` workflow for project lessons notes.
 
 ## Commands
 
@@ -37,7 +37,8 @@ uv run pytest -m eval                           # golden + holdout + holdout2 th
 uv run unilib index [--full]
 uv run unilib search "query" [--module CODE] [-k 8] [--no-rerank] [--citekey KEY | --report NAME] [--books]
 uv run unilib outline --book FILE [--author A] [--start N]
-uv run unilib eval [--golden FILE] [--compare] [--no-rerank] [--rerank-n N]
+uv run unilib eval [--golden FILE] [--compare] [--no-rerank] [--rerank-n N] [--library NAME|all]
+uv run unilib snapshot [ID] [--refresh]          # fetch a [[snapshot]] of sources.toml into _ingest/ID/
 uv run unilib-mcp [--stdio] [--host H --port P] [--idle-exit S]
 uv run unilib-client drop FILE… | check-bib FILE | zotero setup|sync-report DIR [--name N]|find TERMS|status
 ```
@@ -47,6 +48,7 @@ uv run unilib-client drop FILE… | check-bib FILE | zotero setup|sync-report DI
 Environment:
 - **Server:**
   - `UNILIB_ROOT`: library root.
+  - `UNILIB_LIBRARIES`: `name=path,…` to serve several libraries; the first is the default endpoint. Names `all`, `lesson` and `zotero` are reserved.
   - `UNILIB_TOKEN_FILE`: bearer token. Required unless the server is bound to loopback.
   - `UNILIB_IDLE_EXIT_S`: default 900; `0` means never exit.
   - `UNILIB_MODEL_CACHE`: default `~/.cache/unilib/models`.
@@ -64,7 +66,7 @@ Tests:
 ## Architecture
 
 - **Naming and placement** (`organize.py`):
-  - Files are named `<TYPE><NN>_<Kebab-Title>.<ext>` with TYPE ∈ `L T CW N E X B`. `E` is for `.ipynb` only; `B` is a reading-list textbook chapter (PDF only).
+  - Files are named `<TYPE><NN>_<Kebab-Title>.<ext>` with TYPE ∈ `L T CW N E X B D`. `E` is for `.ipynb` only; `B` is a reading-list textbook chapter (PDF only); `D` is reference docs/spec (PDF or `.md`). `.md` takes `D`, `N` or `X`.
   - On a name collision the file gets a `-b`…`-z` suffix, which `parse_name` strips.
   - `place` and `split` drop exact duplicates, comparing sha256 against every library file, including `_originals/`.
   - A sibling PPTX goes to `<module>/_originals/`.
@@ -76,6 +78,9 @@ Tests:
   - Only files directly inside module folders are indexed; `_originals/` is not.
   - Pages are split into chunks of up to 300 words, and a tail under 50 words merges into the previous chunk.
   - Notebooks are indexed per section (`notebook.py`), so `page` means the first cell id for `.ipynb`.
+  - Markdown (`markdown.py`) is split into h1–h3 sections; `page` is the section ordinal, cited `path §N`. YAML frontmatter is stripped (and read for `version`, `source_url`, `licence`, `superseded`).
+  - `sources.toml` `[[source]]` entries (first matching `files` glob wins) fill `docs.version/source_url/licence/superseded`; changes update in place without re-embedding. `[[snapshot]]` entries are for `snapshot.py`.
+  - Lessons (`lessons.py`): `[lessons] globs` in `modules.toml` → module `LESSONS`, type `K`, `docs.path` absolute, `docs.citekey` = lesson id, `docs.project`. Invalid or duplicate notes are logged and skipped.
   - The embedded text is `title + "\n" + chunk`.
   - Change detection checks mtime/size first, then sha256. Each doc is written in its own savepoint.
   - A change of embedding model/dim or of `SCHEMA_VERSION` triggers a full rebuild automatically. A full rebuild runs in one transaction, so readers keep seeing the old index until it commits. Bump `SCHEMA_VERSION` whenever the stored form changes.
@@ -85,7 +90,8 @@ Tests:
   - Models (`models.py` → `qwen.py`): Qwen3-Embedding-0.6B (dim 1024, with its query instruction) and Qwen3-Reranker-0.6B in bf16 (P(yes) over yes/no, computed in float32).
   - Results are fused with RRF (`RRF_K=60`, pool 50). The top `RERANK_N=10` are then rescored by the cross-encoder. Hits are deduped by (path, page) and cut to k (max 50).
   - `RankConfig` switches: A length-weighted BM25, B AND-first FTS with OR fallback, C collapse of near-identical adjacent pages, E rerank. `DEFAULT_RANK` is B + E. Read the ranking eval notes (see `CLAUDE.local.md`) before changing any ranking constant.
-  - `books=False` by default: `d.type != 'B'` is added only when a B doc exists, so without books the SQL is unchanged.
+  - `books=None` means the library's `[library] books_default` (unset: False): `d.type != 'B'` is added only when a B doc exists, so without books the SQL is unchanged. Superseded docs are excluded the same way unless `superseded=True`. `module` may be a comma list; `project=` filters lessons.
+  - Cross-library (`library="<name>"|"all"` in the MCP tools): each library is searched and reranked on its own; `merge_hits` orders reranked hits by cross-encoder P(yes), then interleaves the rest. Other libraries' hits carry `Hit.library` and cite as `<name>:…`.
   - All reads use one snapshot. `reranker.load()` runs before the snapshot, so a slow load can't pin the WAL.
   - Reranker failures never break search: results fall back to fused order and the error is reported via the thread-local `last_rerank_error()`. A failed model load isn't retried for `RETRY_AFTER_S` (600 s).
   - A model/dim mismatch with the index raises `IndexMismatchError`.
@@ -96,7 +102,8 @@ Tests:
   - `bibcheck.py` checks a .bib against Crossref, then DataCite for DOIs Crossref lacks (arXiv), or OpenAlex by title. Its cache is `$UNILIB_CACHE/bibcheck.json`.
   - `zotero.py` talks to Better BibTeX JSON-RPC only; it never writes Zotero's sqlite.
 - **MCP server** (`server.py`, `serve.py`, `ingest_tools.py`):
-  - **Model loading:** the embedder and reranker load lazily behind locks, because tools run in worker threads.
+  - **Libraries:** tools register on the template `mcp`; `build_servers()` copies them onto one `MCPServer` per library, each tool wrapped in `using_library(root)` (a ContextVar that `library_root()` reads), with instructions generated from that library's `modules.toml` (`[library] title`; without it, the uni text). `serve.build_app()` merges their routes and session-manager lifespans behind one `Gate`. `--stdio` serves the template against `$UNILIB_ROOT`.
+  - **Model loading:** the embedder and reranker load lazily behind locks, because tools run in worker threads. All libraries share them.
   - **Database access:** reads are read-only. For a missing index, a busy DB or an unavailable model, tools return a message string instead of raising.
   - **`get_page`:** takes the hit's `path` and `page` (not the orig page) and returns the page text plus a PNG render for PDFs, or the section text for notebooks.
   - **`serve.py`:**
