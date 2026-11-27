@@ -221,7 +221,8 @@ def list_library(module: str | None = None) -> str:
         if module and m.code.upper() != module.upper():
             continue
         kw = f" · keywords: {', '.join(m.keywords)}" if m.keywords else ""
-        lines.append(f"{m.code} — {m.name} (sem {m.semester}){kw}")
+        sem = f" (sem {m.semester})" if m.semester is not None else ""
+        lines.append(f"{m.code} — {m.name}{sem}{kw}")
         docs = [s for s in statuses if s.module == m.code]
         for s in docs:
             name = s.path.rsplit("/", 1)[-1]

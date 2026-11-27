@@ -4,22 +4,93 @@ import glob
 import os
 import re
 import tomllib
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 
 @dataclass(frozen=True)
 class Module:
     code: str
     name: str
-    semester: int
+    semester: int | None
     folder: str
     keywords: tuple[str, ...] = ()
 
 
+# Set per request by the server when it serves several libraries (one endpoint each).
+_current_root: ContextVar[Path | None] = ContextVar("unilib_root", default=None)
+
+
 def library_root() -> Path:
+    """The library this call acts on: the request's library, else $UNILIB_ROOT, else ~/Documents/UniLibrary."""
+    if (root := _current_root.get()) is not None:
+        return root
     default = Path.home() / "Documents" / "UniLibrary"
     return Path(os.environ.get("UNILIB_ROOT") or default).expanduser().resolve()
+
+
+@contextmanager
+def using_library(root: Path) -> Iterator[Path]:
+    """Make `library_root()` return `root` in this context (and contexts copied from it)."""
+    root = Path(root).expanduser().resolve()
+    token = _current_root.set(root)
+    try:
+        yield root
+    finally:
+        _current_root.reset(token)
+
+
+@dataclass(frozen=True)
+class Library:
+    name: str  # endpoint name: the first library is served at /mcp, the others at /<name>/mcp
+    root: Path
+
+
+_LIBRARY_NAME = re.compile(r"[a-z][a-z0-9-]*")
+RESERVED_LIBRARY_NAMES = frozenset({"all"})  # search(library="all") means every library
+
+
+def libraries() -> list[Library]:
+    """$UNILIB_LIBRARIES (`name=path,name=path`, first one is the default), else one library
+    named `uni` at `library_root()`."""
+    spec = os.environ.get("UNILIB_LIBRARIES", "").strip()
+    if not spec:
+        return [Library("uni", library_root())]
+    out: list[Library] = []
+    for item in (s.strip() for s in spec.split(",")):
+        name, sep, path = item.partition("=")
+        name, path = name.strip(), path.strip()
+        if not sep:
+            raise ValueError(f"UNILIB_LIBRARIES: expected name=path, got {item!r}")
+        if not _LIBRARY_NAME.fullmatch(name):
+            raise ValueError(f"UNILIB_LIBRARIES: bad library name {name!r} (lowercase letters, digits, '-')")
+        if name in RESERVED_LIBRARY_NAMES:
+            raise ValueError(f"UNILIB_LIBRARIES: {name!r} is reserved")
+        if not path:
+            raise ValueError(f"UNILIB_LIBRARIES: library {name!r} has no path")
+        if any(lib.name == name for lib in out):
+            raise ValueError(f"UNILIB_LIBRARIES: duplicate library {name!r}")
+        out.append(Library(name, Path(path).expanduser().resolve()))
+    return out
+
+
+@dataclass(frozen=True)
+class LibrarySettings:
+    title: str | None = None     # shown in the endpoint's instructions
+    books_default: bool = False  # search includes B files unless told otherwise (True where books are primary)
+
+
+def load_library_settings(root: Path) -> LibrarySettings:
+    """The optional [library] table of modules.toml."""
+    t = tomllib.loads((root / "modules.toml").read_text()).get("library", {})
+    books = t.get("books_default", False)
+    if not isinstance(books, bool):
+        raise ValueError(f"modules.toml: [library] books_default must be true or false, got {books!r}")
+    title = t.get("title")
+    return LibrarySettings(title=str(title) if title is not None else None, books_default=books)
 
 
 def model_cache_dir() -> Path:
@@ -50,7 +121,7 @@ def load_modules(root: Path) -> list[Module]:
         Module(
             code=m["code"],
             name=m["name"],
-            semester=int(m["semester"]),
+            semester=int(m["semester"]) if m.get("semester") is not None else None,
             folder=m["folder"],
             keywords=tuple(m.get("keywords", [])),
         )
