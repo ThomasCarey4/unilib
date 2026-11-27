@@ -16,6 +16,7 @@ from .models import make_embedder, make_reranker
 from .evaluate import evaluate, load_golden
 from .index import index_library
 from .organize import DuplicateError, build_name, convert_pptx, parse_part, parse_range, place, split, unique_dest
+from .markdown import read as md_read, sections as md_sections
 from .notebook import cell_count, sections
 from .pdftools import DEFAULT_SKIP, book_plan, outline, peek, render_page
 from .search import DEFAULT_RANK, RankConfig, last_rerank_error, search
@@ -23,13 +24,26 @@ from .search import DEFAULT_RANK, RankConfig, last_rerank_error, search
 
 def _type_num(code: str) -> tuple[str, int | None]:
     """'L03' -> ('L', 3); 'X' -> ('X', None)."""
-    m = re.fullmatch(r"(CW|L|T|N|X|E|B)(\d+)?", code.upper())
+    m = re.fullmatch(r"(CW|L|T|N|X|E|B|D)(\d+)?", code.upper())
     if not m:
         raise ValueError(f"bad type/number {code!r}, expected e.g. L03, CW1, B01, X")
     return m[1], int(m[2]) if m[2] else None
 
 
+def md_peek(path: Path, n: int = 3) -> str:
+    """Frontmatter keys and the first n sections of a markdown file, for classifying it."""
+    meta, _ = md_read(path)
+    secs = md_sections(path)
+    head = f"# {path.name} ({len(secs)} sections)"
+    if meta:
+        head += "\n" + "\n".join(f"{k}: {v}" for k, v in meta.items() if not isinstance(v, (dict, list)))
+    return head + "\n" + "\n".join(f"--- § {s.num} ---\n{s.text[:1500]}" for s in secs[:n])
+
+
 def cmd_peek(args, root: Path) -> int:
+    if args.file.suffix.lower() == ".md":
+        print(md_peek(args.file))
+        return 0
     if args.file.suffix.lower() == ".ipynb":
         secs = sections(args.file)
         print(f"# {args.file.name} ({cell_count(args.file)} cells)")

@@ -15,9 +15,10 @@ import pymupdf
 
 from .config import Module, load_modules
 
-TYPES = ("L", "T", "CW", "N", "X", "E", "B")
-EXTS = (".pdf", ".ipynb")
-NAME_RE = re.compile(r"^(?P<type>CW|L|T|N|X|E|B)(?P<num>\d{2})?_(?P<title>.+)\.(?:pdf|ipynb)$")
+TYPES = ("L", "T", "CW", "N", "X", "E", "B", "D")
+EXTS = (".pdf", ".ipynb", ".md")
+MD_TYPES = ("D", "N", "X")  # markdown: reference docs/specs, notes, other
+NAME_RE = re.compile(r"^(?P<type>CW|L|T|N|X|E|B|D)(?P<num>\d{2})?_(?P<title>.+)\.(?:pdf|ipynb|md)$")
 
 
 def sha256(path: Path) -> str:
@@ -41,6 +42,10 @@ def build_name(type_: str, num: int | None, title: str, ext: str = ".pdf") -> st
         raise ValueError("type E is notebook-only (.ipynb)")
     if type_ == "B" and ext != ".pdf":
         raise ValueError("type B (book part) is PDF-only")
+    if type_ == "D" and ext not in (".pdf", ".md"):
+        raise ValueError("type D (reference docs/spec) is PDF or Markdown")
+    if ext == ".md" and type_ not in MD_TYPES:
+        raise ValueError(f"markdown files take a type in {MD_TYPES}, got {type_!r}")
     if type_ not in TYPES:
         raise ValueError(f"type must be one of {TYPES}, got {type_!r}")
     if num is not None and not 0 <= num <= 99:

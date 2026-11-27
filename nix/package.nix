@@ -28,6 +28,7 @@ let
 
   serverDeps = with python3Packages; [
     pymupdf
+    pyyaml
     numpy
     sentence-transformers
     transformers

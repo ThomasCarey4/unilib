@@ -65,7 +65,8 @@ def ingest_list() -> str:
 def ingest_peek(file: str, pages: int = 3, render: int = 1) -> list:
     """First pages' text of a file in _ingest/ plus a PNG of one page, to classify it.
 
-    For a .ipynb: cell count and the first 3 sections, no image.
+    For a .ipynb: cell count and the first 3 sections; for a .md: its frontmatter and first 3
+    sections. Neither has an image.
 
     Args:
         file: name relative to _ingest/, as listed by ingest_list
@@ -74,6 +75,8 @@ def ingest_peek(file: str, pages: int = 3, render: int = 1) -> list:
     """
     try:
         p = _file(file)
+        if p.suffix.lower() == ".md":
+            return [cli.md_peek(p)]
         if p.suffix.lower() == ".ipynb":
             secs = sections(p)
             body = "\n".join(f"--- cell {s.cell} ---\n{s.text}" for s in secs[:3])
@@ -117,7 +120,7 @@ def ingest_convert(file: str) -> str:
 
 @mcp.tool()
 def ingest_place(file: str, module: str, type_num: str, title: str) -> str:
-    """Move a PDF or notebook from _ingest/ into a module folder, renamed `<TYPE><NN>_<Title>`.
+    """Move a PDF, notebook or markdown file from _ingest/ into a module folder, renamed `<TYPE><NN>_<Title>`.
 
     A sibling .pptx goes to the module's _originals/. Exact duplicates of a library file are dropped.
     Run only after the user has approved the ingest table.
@@ -125,7 +128,7 @@ def ingest_place(file: str, module: str, type_num: str, title: str) -> str:
     Args:
         file: name relative to _ingest/
         module: module code, e.g. MATH3001
-        type_num: type and number, e.g. L03, T02, CW1, E09, B01, X
+        type_num: type and number, e.g. L03, T02, CW1, E09, B01, D04 (reference docs/spec, PDF or .md), X
         title: short title, e.g. "Newton methods"
     """
     try:

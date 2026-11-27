@@ -15,6 +15,7 @@ import pymupdf
 from .bib import BibEntry, parse_bib, pdf_for
 from .config import PAPERS, Module, PapersConfig, db_path, load_modules, load_papers, paper_rel
 from .embed import Embedder
+from .markdown import sections as md_sections
 from .notebook import cell_count, sections
 from .organize import parse_name, read_split_meta, read_split_skip, sha256
 from .textnorm import fold
@@ -63,7 +64,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, title, module UNI
 _CONTENT_TABLES = ("chunks_fts", "chunks", "docs")
 
 MIN_TAIL_WORDS = 50
-DOC_SUFFIXES = (".pdf", ".ipynb")
+DOC_SUFFIXES = (".pdf", ".ipynb", ".md")
 
 
 @dataclass
@@ -201,11 +202,11 @@ def chunk_text(text: str, max_words: int = 300) -> list[str]:
 
 
 def _kind(path: Path) -> str:
-    return "ipynb" if path.suffix.lower() == ".ipynb" else "pdf"
+    return {".ipynb": "ipynb", ".md": "md"}.get(path.suffix.lower(), "pdf")
 
 
 def module_docs(root: Path, module: Module) -> list[Path]:
-    """PDFs and notebooks directly in the module folder."""
+    """PDFs, notebooks and markdown files directly in the module folder."""
     folder = root / module.folder
     if not folder.is_dir():
         return []
@@ -256,6 +257,10 @@ def _prepare_doc(embedder: Embedder, pdf: Path, entry: BibEntry | None = None) -
     if kind == "ipynb":
         original, offset, n_pages = None, 0, cell_count(pdf)
         pages = _notebook_pages(pdf)
+    elif kind == "md":
+        secs = md_sections(pdf)
+        original, offset, n_pages = None, 0, len(secs)
+        pages = [(s.num, chunk, 0) for s in secs for chunk in chunk_text(s.text)]
     else:
         with pymupdf.open(pdf) as doc:
             original, offset = read_split_meta(doc) if entry is None else (None, 0)

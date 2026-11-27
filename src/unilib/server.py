@@ -15,6 +15,7 @@ from .config import (PAPERS, Library, db_path, libraries, library_root, load_lib
 from .embed import Embedder
 from .index import connect, library_status, paper_status
 from .organize import parse_name
+from .markdown import MarkdownError, read as md_read, section_at as md_section_at
 from .notebook import NotebookError, section_at
 from .pdftools import render_page
 from .rerank import Reranker
@@ -130,7 +131,8 @@ def search(query: str, module: str | None = None, k: int = 8,
 
     Always returns the k best-ranked hits with no relevance cutoff, so judge
     relevance from the snippets yourself. Each hit starts with a citation
-    `path p.N` (PDF slides) or `path cell N` (Jupyter notebooks) or, for papers, `@citekey p.N`; quote it
+    `path p.N` (PDF), `path cell N` (Jupyter notebooks), `path §N` (markdown docs, section N) or,
+    for papers, `@citekey p.N`; quote it
     verbatim. For a paper pass `@citekey` as get_page's `path`. citekey and report
     match case-sensitively. Snippets come from the PDF text layer and
     may garble maths, so call `get_page` for equations, formulas and diagrams.
@@ -207,18 +209,19 @@ def _paper_path(citekey: str) -> Path | None:
 
 @mcp.tool()
 def get_page(path: str, page: int, image: bool = True) -> list:
-    """Full text of one slide page plus a PNG render, or one notebook section.
+    """Full text of one PDF page plus a PNG render, or one notebook or markdown section.
 
     `path` and `page` must be exactly the `path p.N` / `path cell N` citation
     from a search hit (not the "orig" page in parentheses). For PDFs the PNG
     is the reliable source for maths and diagrams; the text layer may garble
     them. For `.ipynb` notebooks `page` is the cell number N from the
     citation; the result is the text of the section starting at (or
-    containing) that cell, with no image.
+    containing) that cell, with no image. For `.md` documents `page` is the section number N
+    of `path §N`; the result is that section's text and its source URL when known, with no image.
 
     Args:
-        path: library-relative PDF/.ipynb path, or `@citekey` for a paper, exactly as in a search hit
-        page: 1-based page number (PDF) or cell number (notebook) N from the same hit
+        path: library-relative PDF/.ipynb/.md path, or `@citekey` for a paper, exactly as in a search hit
+        page: 1-based page number (PDF), cell number (notebook) or section number (markdown) N from the same hit
         image: include the rendered PNG (default true, PDFs only); false returns text only
     """
     if path.startswith("@"):
@@ -228,8 +231,17 @@ def get_page(path: str, page: int, image: bool = True) -> list:
     else:
         root = library_root().resolve()
         target = (root / path).resolve()
-        if root not in target.parents or target.suffix.lower() not in (".pdf", ".ipynb") or not target.is_file():
-            return [f"No such library PDF or notebook: {path}"]
+        if root not in target.parents or target.suffix.lower() not in (".pdf", ".ipynb", ".md") or not target.is_file():
+            return [f"No such library PDF, notebook or markdown document: {path}"]
+    if target.suffix.lower() == ".md":
+        try:
+            meta, _ = md_read(target)
+            sec = md_section_at(target, page)
+        except (MarkdownError, ValueError) as e:
+            return [f"Cannot read {path}: {e}"]
+        url = meta.get("source_url")
+        src = f"\n\n(source: {url}{'#' + sec.anchor if sec.anchor else ''})" if url else ""
+        return [f"{path} §{sec.num}\n\n{sec.text}{src}"]
     if target.suffix.lower() == ".ipynb":
         try:
             sec = section_at(target, page)
@@ -289,7 +301,7 @@ def list_library(module: str | None = None) -> str:
                 lines.append(f"  {name} · deleted (re-run `unilib index`)")
             else:
                 stale = " · stale (re-run `unilib index`)" if s.state == "stale" else ""
-                unit = "cells" if s.kind == "ipynb" else "pages"
+                unit = {"ipynb": "cells", "md": "sections"}.get(s.kind, "pages")
                 book = " · reading list" if parse_name(name)[0] == "B" else ""
                 lines.append(f"  {name} · {s.n_pages} {unit}{book}{stale}")
         if not docs:

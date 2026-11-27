@@ -1782,6 +1782,7 @@ dependencies = [
 server = [
     { name = "numpy" },
     { name = "pymupdf" },
+    { name = "pyyaml" },
     { name = "sentence-transformers" },
     { name = "torch", version = "2.15.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
@@ -1799,6 +1800,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2,<3" },
     { name = "numpy", marker = "extra == 'server'", specifier = ">=2" },
     { name = "pymupdf", marker = "extra == 'server'", specifier = ">=1.26" },
+    { name = "pyyaml", marker = "extra == 'server'", specifier = ">=6" },
     { name = "sentence-transformers", marker = "extra == 'server'", specifier = ">=5" },
     { name = "torch", marker = "extra == 'server'", specifier = ">=2.8", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", marker = "extra == 'server'", specifier = ">=4.51" },

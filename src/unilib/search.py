@@ -72,7 +72,7 @@ class Hit:
     citekey: str | None = None        # set for Zotero papers (module PAPERS)
 
     def cite(self) -> str:
-        unit = "cell " if self.kind == "ipynb" else "p."
+        unit = {"ipynb": "cell ", "md": "§"}.get(self.kind, "p.")
         s = f"@{self.citekey} {unit}{self.page}" if self.citekey else f"{self.path} {unit}{self.page}"
         if self.original_file:
             s += f" (orig {Path(self.original_file).name} p.{self.original_page})"
