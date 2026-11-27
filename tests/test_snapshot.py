@@ -30,6 +30,10 @@ def docs_repo(tmp_path):
     (repo / "compression" / "settings" / "orderby.mdx").write_text("# compress_orderby\n\nSet it explicitly.\n")
     (repo / "hypertables" / "about.md").write_text("# Hypertables\n\nChunks by time.\n")
     (repo / "README.md").write_text("# readme\n")
+    (repo / "_partials").mkdir()
+    (repo / "_partials" / "_since.mdx").write_text("Available since $TSDB 2.18.\n")
+    (repo / "hypertables" / "partial.md").write_text(
+        'import Since from "versionContent/_partials/_since.mdx";\n\n# Partial user\n\n<Since />\n\nUses $HYPERTABLE.\n')
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "docs")
@@ -153,3 +157,15 @@ def test_html_to_markdown_tables_and_links():
                           "<script>alert(1)</script>")
     assert "## T" in md and "| a | b |" in md and "| 1 | 2 |" in md
     assert "see docs (https://x.org) and `x < y`" in md and "alert" not in md
+
+
+def test_git_snapshot_inlines_partials_and_variables(eng):
+    text = (eng / "sources.toml").read_text().replace(
+        'source_url = "https://github.com/timescale/docs/blob/2.22.0"',
+        'source_url = "https://github.com/timescale/docs/blob/2.22.0"\n'
+        'partials = { "versionContent/" = "" }\nvariables = { "$TSDB" = "TimescaleDB", "$HYPERTABLE" = "hypertable" }', 1)
+    (eng / "sources.toml").write_text(text)
+    run_snapshot(eng, "tsdb-docs", log=lambda s: None)
+    body = (eng / "_ingest" / "tsdb-docs" / "Hypertables.md").read_text()
+    assert "Available since TimescaleDB 2.18." in body and "Uses hypertable." in body
+    assert "<Since" not in body and "$" not in body.split("---", 2)[2]

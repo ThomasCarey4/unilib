@@ -40,7 +40,8 @@ from .organize import kebab
 MODES = ("pdf", "git", "html")
 MAX_FILES = 99  # D01…D99 per module
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
-_KEYS = {"id", "mode", "url", "urls", "ref", "paths", "group", "version", "licence", "source_url", "notes"}
+_KEYS = {"id", "mode", "url", "urls", "ref", "paths", "group", "version", "licence", "source_url", "notes",
+         "partials", "variables"}
 USER_AGENT = "unilib-snapshot/1 (personal reference library)"
 
 
@@ -56,6 +57,8 @@ class Snapshot:
     version: str | None = None
     licence: str | None = None
     source_url: str | None = None
+    partials: tuple[tuple[str, str], ...] = ()   # git: MDX import-path prefix -> repo dir ("" = root)
+    variables: tuple[tuple[str, str], ...] = ()  # text substitutions, e.g. ("$HYPERTABLE", "hypertable")
 
 
 def load_snapshots(root: Path) -> list[Snapshot]:
@@ -83,10 +86,14 @@ def load_snapshots(root: Path) -> list[Snapshot]:
             raise ValueError(f"{where}: group must be a non-negative integer")
         if any(s.id == sid for s in out):
             raise ValueError(f"{where}: duplicate id {sid!r}")
+        for k in ("partials", "variables"):
+            if not isinstance(e.get(k, {}), dict) or not all(isinstance(v, str) for v in e.get(k, {}).values()):
+                raise ValueError(f"{where}: {k} must be a table of strings")
         opt = lambda k: str(e[k]) if e.get(k) is not None else None
         out.append(Snapshot(sid, mode, opt("url"), tuple(map(str, e.get("urls", ()))), opt("ref"),
                             tuple(map(str, e.get("paths", ()))), group, opt("version"), opt("licence"),
-                            opt("source_url")))
+                            opt("source_url"), tuple(e.get("partials", {}).items()),
+                            tuple(sorted(e.get("variables", {}).items(), key=lambda kv: -len(kv[0])))))
     return out
 
 
@@ -118,6 +125,38 @@ def _front(meta: dict) -> str:
 
 
 _MDX_LINE = re.compile(r"^\s*(import\s.+\sfrom\s.+|export\s.+)$")
+_IMPORT = re.compile(r"""^\s*import\s+(\w+)\s+from\s+["']([^"']+)["'];?\s*$""")
+
+
+def inline_partials(text: str, repo: Path, prefixes: tuple[tuple[str, str], ...], depth: int = 0) -> str:
+    """Replace `<Name />` with the content of the file `import Name from "<prefix>…"` names (recursively)."""
+    if not prefixes or depth > 3:
+        return text
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _IMPORT.match(line)
+        if not m:
+            continue
+        name, target = m.groups()
+        for prefix, base in prefixes:
+            if target.startswith(prefix):
+                rel = Path(base) / target[len(prefix):]
+                for cand in (rel, rel.with_suffix(".md"), rel.with_suffix(".mdx")):
+                    f = (repo / cand).resolve()
+                    if f.is_file() and f.is_relative_to(repo.resolve()):
+                        _, body = frontmatter(f.read_text(encoding="utf-8", errors="replace"))
+                        found[name] = inline_partials(body, repo, prefixes, depth + 1).strip()
+                        break
+                break
+    for name, body in found.items():
+        text = re.sub(rf"<{name}(\s[^<>]*)?/>", lambda _m, b=body: b, text)
+    return text
+
+
+def substitute(text: str, variables: tuple[tuple[str, str], ...]) -> str:
+    for k, v in variables:  # longest first, so $COLUMNSTORE_CAP is not cut by $COLUMNSTORE
+        text = text.replace(k, v)
+    return text
 _JSX_TAG = re.compile(r"</?[A-Z][A-Za-z0-9.]*(\s[^<>]*)?/?>")
 
 
@@ -175,8 +214,10 @@ def _git_snapshot(s: Snapshot, dest: Path, fetched: str, log: Callable[[str], No
                     meta, body = frontmatter(f.read_text(encoding="utf-8", errors="replace"))
                 except MarkdownError:
                     meta, body = {}, f.read_text(encoding="utf-8", errors="replace")
-                ftitle = str(meta.get("title") or Path(rel).stem.replace("-", " ").title())
-                parts.append(f"# {ftitle}\n\nSource: {base}/{rel}\n\n{_demote(clean_mdx(body)).strip()}\n")
+                ftitle = substitute(str(meta.get("title") or meta.get("api_name")
+                                        or Path(rel).stem.replace("-", " ").title()), s.variables)
+                body = substitute(clean_mdx(inline_partials(body, repo, s.partials)), s.variables)
+                parts.append(f"# {ftitle}\n\nSource: {base}/{rel}\n\n{_demote(body).strip()}\n")
             doc = _front({"title": f"{title}", "version": s.version, "licence": s.licence, "fetched": fetched,
                           "snapshot": s.id, "ref": s.ref, "commit": commit}) + "\n".join(parts)
             path = dest / f"{kebab(title) or 'Index'}.md"
