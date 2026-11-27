@@ -10,10 +10,10 @@ from typing import Callable
 import pymupdf
 from mcp.server.mcpserver import Image, MCPServer
 
-from .config import (PAPERS, Library, db_path, libraries, library_root, load_library_settings, load_modules,
+from .config import (LESSON_PREFIX, LESSONS, PAPERS, Library, load_lessons, db_path, libraries, library_root, load_library_settings, load_modules,
                      load_papers, paper_file, using_library)
 from .embed import Embedder
-from .index import connect, library_status, paper_status
+from .index import connect, lesson_status, library_status, paper_status
 from .organize import parse_name
 from .markdown import MarkdownError, read as md_read, section_at as md_section_at
 from .notebook import NotebookError, section_at
@@ -126,14 +126,15 @@ def _get_reranker() -> Reranker | None:
 @mcp.tool()
 def search(query: str, module: str | None = None, k: int = 8,
            citekey: str | None = None, report: str | None = None, books: bool | None = None,
-           superseded: bool = False) -> str:
+           superseded: bool = False, project: str | None = None) -> str:
     """Hybrid keyword + semantic search over this library's documents (slides, book chapters, docs)
     and its Zotero papers (module PAPERS).
 
     Always returns the k best-ranked hits with no relevance cutoff, so judge
     relevance from the snippets yourself. Each hit starts with a citation
-    `path p.N` (PDF), `path cell N` (Jupyter notebooks), `path §N` (markdown docs, section N) or,
-    for papers, `@citekey p.N`; quote it
+    `path p.N` (PDF), `path cell N` (Jupyter notebooks), `path §N` (markdown docs, section N),
+    `@citekey p.N` (papers) or `lesson:<id> §N` (project lessons, module LESSONS), with the source's
+    `[version]` when known; quote it
     verbatim. For a paper pass `@citekey` as get_page's `path`. citekey and report
     match case-sensitively. Snippets come from the PDF text layer and
     may garble maths, so call `get_page` for equations, formulas and diagrams.
@@ -155,6 +156,7 @@ def search(query: str, module: str | None = None, k: int = 8,
         books: include book chapters (B… files). Default: the library's setting (see the server
             instructions); in the uni library they are off — turn on for background, derivations
             or worked examples when the slides are thin
+        project: only lessons of this project (module LESSONS), e.g. serenlink
         superseded: also search documents marked superseded (older versions of a source); a hit's
             `[version]` tag says which version it describes
     """
@@ -170,7 +172,8 @@ def search(query: str, module: str | None = None, k: int = 8,
                 "run `unilib index` once with network access to download models.")
     try:
         hits = run_search(root, embedder, query, module=module, k=k, citekey=citekey,
-                        report=report, books=books, superseded=superseded, reranker=_get_reranker())
+                        report=report, books=books, superseded=superseded, project=project,
+                        reranker=_get_reranker())
     except IndexMismatchError as e:
         return f"Search unavailable: {e}."
     except FileNotFoundError:
@@ -210,6 +213,22 @@ def _paper_path(citekey: str) -> Path | None:
     return p if p is not None and p.is_file() else None
 
 
+def _lesson_path(lesson_id: str) -> Path | None:
+    """The lesson's markdown file (docs.path is its absolute path on the server)."""
+    try:
+        conn = connect(library_root(), readonly=True)
+    except FileNotFoundError:
+        return None
+    try:
+        row = conn.execute("SELECT path FROM docs WHERE module = ? AND citekey = ?", (LESSONS, lesson_id)).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        conn.close()
+    p = Path(row[0]) if row else None
+    return p if p is not None and p.is_file() else None
+
+
 @mcp.tool()
 def get_page(path: str, page: int, image: bool = True) -> list:
     """Full text of one PDF page plus a PNG render, or one notebook or markdown section.
@@ -223,10 +242,20 @@ def get_page(path: str, page: int, image: bool = True) -> list:
     of `path §N`; the result is that section's text and its source URL when known, with no image.
 
     Args:
-        path: library-relative PDF/.ipynb/.md path, or `@citekey` for a paper, exactly as in a search hit
+        path: library-relative PDF/.ipynb/.md path, `@citekey` for a paper or `lesson:<id>` for a
+            lesson, exactly as in a search hit
         page: 1-based page number (PDF), cell number (notebook) or section number (markdown) N from the same hit
         image: include the rendered PNG (default true, PDFs only); false returns text only
     """
+    if path.startswith(LESSON_PREFIX):
+        target = _lesson_path(path.removeprefix(LESSON_PREFIX))
+        if target is None:
+            return [f"No indexed lesson {path} — check `list_library` (module LESSONS)"]
+        try:
+            sec = md_section_at(target, page)
+        except (MarkdownError, ValueError) as e:
+            return [f"Cannot read {path}: {e}"]
+        return [f"{path} §{sec.num}\n\n{sec.text}\n\n(file: {target})"]
     if path.startswith("@"):
         target = _paper_path(path[1:])
         if target is None:
@@ -281,8 +310,12 @@ def list_library(module: str | None = None) -> str:
         return f"No modules.toml in {root} — create it to define the modules."
     except (tomllib.TOMLDecodeError, ValueError, KeyError, TypeError) as e:
         return f"Invalid modules.toml: {e}"
-    if module and module.upper() != PAPERS and not any(m.code.upper() == module.upper() for m in modules):
-        known = [m.code for m in modules] + ([PAPERS] if papers_cfg else [])
+    try:
+        has_lessons = bool(load_lessons(root))
+    except ValueError as e:
+        return f"Invalid modules.toml: {e}"
+    if module and module.upper() not in (PAPERS, LESSONS) and not any(m.code.upper() == module.upper() for m in modules):
+        known = [m.code for m in modules] + ([PAPERS] if papers_cfg else []) + ([LESSONS] if has_lessons else [])
         return f"Unknown module {module}; known: {', '.join(known)}"
     try:
         statuses = library_status(root)
@@ -333,6 +366,20 @@ def list_library(module: str | None = None) -> str:
                 lines.append(f"{head} · {p.n_pages} pages{tags}{stale}")
         if not rows:
             lines.append("  (empty)")
+    if has_lessons and (not module or module.upper() == LESSONS):
+        lines.append(f"{LESSONS} — project lessons (cite `lesson:<id> §N`; filter with search's `project`)")
+        try:
+            les = lesson_status(root)
+        except sqlite3.DatabaseError:
+            return DB_BUSY
+        for s in les:
+            if s.state == "invalid":
+                lines.append(f"  {s.title} · invalid, not indexed: {s.error}")
+                continue
+            head = f"  {LESSON_PREFIX}{s.id} · {s.project} · {s.kind} · {s.date} · {s.title}"
+            state = {"new": " · not indexed", "stale": " · stale (re-run `unilib index`)"}.get(s.state, "")
+            sup = " · superseded" if s.superseded else ""
+            lines.append(f"{head}{sup}{state}")
     return "\n".join(lines)
 
 

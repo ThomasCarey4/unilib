@@ -13,15 +13,16 @@ import numpy as np
 import pymupdf
 
 from .bib import BibEntry, parse_bib, pdf_for
-from .config import (PAPERS, Module, PapersConfig, SourceMeta, db_path, load_modules, load_papers, load_sources,
+from .config import (LESSONS, PAPERS, Module, load_lessons, PapersConfig, SourceMeta, db_path, load_modules, load_papers, load_sources,
                      paper_rel, source_meta)
 from .embed import Embedder
+from .lessons import Lesson, parse_lesson
 from .markdown import MarkdownError, read as md_read, sections as md_sections
 from .notebook import cell_count, sections
 from .organize import parse_name, read_split_meta, read_split_skip, sha256
 from .textnorm import fold
 
-SCHEMA_VERSION = 5  # 5: docs.version/source_url/licence/superseded from sources.toml or frontmatter
+SCHEMA_VERSION = 5  # 5: docs.version/source_url/licence/superseded (sources.toml/frontmatter), docs.project (lessons)
 # 4: docs.citekey/year/authors/reports for Zotero papers (module PAPERS)
 # 3: FTS columns hold textnorm.fold(text); chunks.text stays original
 
@@ -52,7 +53,8 @@ CREATE TABLE IF NOT EXISTS docs(
     version TEXT,
     source_url TEXT,
     licence TEXT,
-    superseded INTEGER NOT NULL DEFAULT 0
+    superseded INTEGER NOT NULL DEFAULT 0,
+    project TEXT
 );
 CREATE TABLE IF NOT EXISTS chunks(
     id INTEGER PRIMARY KEY,
@@ -121,13 +123,14 @@ class PaperStatus:
 
 @dataclass(frozen=True)
 class _PaperMeta:
-    citekey: str
+    citekey: str  # paper citekey, or lesson id
     year: int | None
     authors: str
     reports: str  # comma-joined report names
+    project: str | None = None  # lessons only
 
     def as_row(self) -> tuple:
-        return (self.citekey, self.year, self.authors, self.reports)
+        return (self.citekey, self.year, self.authors, self.reports, self.project)
 
 
 # A heading line alone: "References", "7 REFERENCES", "Bibliography". Pages from there on are a reference list.
@@ -254,10 +257,14 @@ def _notebook_pages(path: Path) -> list[tuple[int, str, int]]:
     return pages
 
 
-def _prepare_doc(embedder: Embedder, pdf: Path, entry: BibEntry | None = None) -> _PreparedDoc:
-    """Extract text and compute embeddings without touching the DB. With `entry`, pdf is a paper."""
+def _prepare_doc(embedder: Embedder, pdf: Path, entry: BibEntry | None = None,
+                 lesson: Lesson | None = None) -> _PreparedDoc:
+    """Extract text and compute embeddings without touching the DB. With `entry`, pdf is a paper;
+    with `lesson`, a project lesson (markdown)."""
     if entry is not None:
         type_, num, title = "P", None, _paper_title(entry, pdf)
+    elif lesson is not None:
+        type_, num, title = "K", None, lesson.title
     else:
         type_, num, title = parse_name(pdf.name)
     kind = _kind(pdf)
@@ -318,11 +325,12 @@ def doc_source(entries, path: Path, rel: str) -> SourceMeta:
 def _write_doc(conn: sqlite3.Connection, module_code: str, rel: str, digest: str,
                st_mtime: float, st_size: int, prep: _PreparedDoc, meta: _PaperMeta | None = None,
                src: SourceMeta | None = None) -> None:
-    paper = meta.as_row() if meta else (None, None, None, None)
+    paper = meta.as_row() if meta else (None, None, None, None, None)
     doc_id = conn.execute(
         "INSERT INTO docs(path, kind, module, type, num, title, sha256, original_file, page_offset, n_pages,"
-        " indexed_at, mtime, size, citekey, year, authors, reports, version, source_url, licence, superseded)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " indexed_at, mtime, size, citekey, year, authors, reports, project,"
+        " version, source_url, licence, superseded)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (rel, prep.kind, module_code, prep.type, prep.num, prep.title, digest, prep.original_file, prep.page_offset,
          prep.n_pages, datetime.now(timezone.utc).isoformat(), st_mtime, st_size, *paper, *_source_row(src)),
     ).lastrowid
@@ -387,15 +395,15 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
             _bump_generation(conn)
 
         existing = {r["path"]: r for r in conn.execute(
-            "SELECT id, path, module, sha256, mtime, size, title, citekey, year, authors, reports,"
+            "SELECT id, path, module, sha256, mtime, size, title, citekey, year, authors, reports, project,"
             " version, source_url, licence, superseded FROM docs")}
         stats, seen = IndexStats(), set()
 
         def sync_meta(old: sqlite3.Row, meta: _PaperMeta | None) -> None:
             """Report tags etc. change without the PDF changing: update in place, no re-embedding."""
-            if meta and (old["citekey"], old["year"], old["authors"], old["reports"]) != meta.as_row():
+            if meta and (old["citekey"], old["year"], old["authors"], old["reports"], old["project"]) != meta.as_row():
                 in_savepoint(lambda: conn.execute(
-                    "UPDATE docs SET citekey = ?, year = ?, authors = ?, reports = ? WHERE id = ?",
+                    "UPDATE docs SET citekey = ?, year = ?, authors = ?, reports = ?, project = ? WHERE id = ?",
                     (*meta.as_row(), old["id"])))
 
         def sync_source(old: sqlite3.Row, src: SourceMeta | None) -> None:
@@ -408,7 +416,7 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
 
         def index_one(path: Path, rel: str, module_code: str,
                       entry: BibEntry | None = None, meta: _PaperMeta | None = None,
-                      src: SourceMeta | None = None) -> None:
+                      src: SourceMeta | None = None, lesson: Lesson | None = None) -> None:
             seen.add(rel)  # even if it fails below, so its previous entry is kept
             old = existing.get(rel)
             try:
@@ -428,7 +436,7 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                     sync_source(old, src)
                     stats.unchanged += 1
                     return
-                prep = _prepare_doc(embedder, path, entry)
+                prep = _prepare_doc(embedder, path, entry, lesson)
 
                 def write() -> None:
                     if old is not None:
@@ -473,6 +481,20 @@ def index_library(root: Path, embedder: Embedder, full: bool = False,
                     meta = _PaperMeta(entry.key, entry.year, "; ".join(entry.authors),
                                       ",".join(sorted(tags.get(entry.key, ()))))
                     index_one(pdf, rel, PAPERS, entry, meta)
+
+        lesson_ids: set[str] = set()
+        for path in load_lessons(root):
+            try:
+                les = parse_lesson(path)
+            except ValueError as e:
+                log(f"skipped lesson {path}: {e}")
+                continue
+            if les.id in lesson_ids:
+                log(f"skipped lesson {path}: duplicate lesson id {les.id}")
+                continue
+            lesson_ids.add(les.id)
+            index_one(path, str(path), LESSONS, meta=_PaperMeta(les.id, les.year, "", "", les.project),
+                      src=SourceMeta(version=les.versions or None, superseded=les.superseded), lesson=les)
 
         if not full:
             conn.execute("BEGIN IMMEDIATE")
@@ -522,7 +544,7 @@ def library_status(root: Path) -> list[DocStatus]:
             on_disk.add(rel)
             out.append(DocStatus(rel, module.code, type_, num, title, n_pages, state, _kind(pdf), version, superseded))
     for rel, row in indexed.items():
-        if rel not in on_disk and row["module"] != PAPERS:
+        if rel not in on_disk and row["module"] not in (PAPERS, LESSONS):
             out.append(DocStatus(rel, row["module"], row["type"], row["num"], row["title"],
                                  row["n_pages"], "deleted", row["kind"]))
     return out
@@ -558,4 +580,49 @@ def paper_status(root: Path) -> list[PaperStatus]:
             state = "indexed" if (row["mtime"], row["size"]) == (st.st_mtime, st.st_size) else "stale"
             n_pages = row["n_pages"]
         out.append(PaperStatus(e.key, e.title, e.year, n_pages, ",".join(sorted(tags.get(e.key, ()))), state))
+    return out
+
+
+@dataclass(frozen=True)
+class LessonStatus:
+    id: str
+    project: str
+    kind: str
+    date: str
+    title: str
+    n_sections: int | None
+    state: str  # "indexed" | "stale" | "new" | "invalid"
+    superseded: bool
+    error: str = ""
+
+
+def lesson_status(root: Path) -> list[LessonStatus]:
+    """Every lesson file the [lessons] globs match, with its index state."""
+    files = load_lessons(root)
+    if not files:
+        return []
+    indexed: dict[str, sqlite3.Row] = {}
+    if db_path(root).exists():
+        conn = connect(root, readonly=True)
+        try:
+            if any(r[1] == "project" for r in conn.execute("PRAGMA table_info(docs)")):
+                indexed = {r["path"]: r for r in conn.execute(
+                    "SELECT path, n_pages, mtime, size FROM docs WHERE module = ?", (LESSONS,))}
+        finally:
+            conn.close()
+    out = []
+    for path in files:
+        try:
+            les = parse_lesson(path)
+        except ValueError as e:
+            out.append(LessonStatus(path.stem, "", "", "", path.name, None, "invalid", False, str(e)))
+            continue
+        row = indexed.get(str(path))
+        if row is None:
+            state, n = "new", None
+        else:
+            st = path.stat()
+            state = "indexed" if (row["mtime"], row["size"]) == (st.st_mtime, st.st_size) else "stale"
+            n = row["n_pages"]
+        out.append(LessonStatus(les.id, les.project, les.kind, les.date, les.title, n, state, les.superseded))
     return out

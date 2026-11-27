@@ -6,6 +6,7 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import LESSON_PREFIX, LESSONS
 from .embed import Embedder
 from .models import make_reranker
 from .rerank import Reranker
@@ -67,6 +68,14 @@ def load_golden(path: Path) -> list[GoldenQuery]:
     return out
 
 
+def answer_keys(h) -> tuple[str, ...]:
+    """What a golden answer may name for this hit: its path, or `@citekey` (papers) / `lesson:<id>` (lessons)."""
+    keys = [h.path]
+    if getattr(h, "citekey", None):
+        keys.append((LESSON_PREFIX if h.module == LESSONS else "@") + h.citekey)
+    return tuple(keys)
+
+
 def evaluate(root: Path, embedder: Embedder, golden: list[GoldenQuery], k: int = 10,
              config: RankConfig | None = None, reranker: Reranker | None = None,
              rerank_n: int | None = None) -> EvalReport:
@@ -85,7 +94,7 @@ def evaluate(root: Path, embedder: Embedder, golden: list[GoldenQuery], k: int =
         rank = None
         for i, h in enumerate(hits, 1):
             pages = {h.page, *getattr(h, "also_pages", ())}
-            if any((h.path, p) in gq.answers for p in pages):
+            if any((key, p) in gq.answers for key in answer_keys(h) for p in pages):
                 rank = i
                 break
         rep.rows.append(EvalRow(gq, rank, dt))

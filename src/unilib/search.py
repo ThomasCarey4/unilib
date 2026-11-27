@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import db_path, load_library_settings
+from .config import LESSON_PREFIX, LESSONS, db_path, load_library_settings
 from .embed import Embedder
 from .index import connect, get_meta
 from .rerank import Reranker
@@ -74,7 +74,12 @@ class Hit:
 
     def cite(self) -> str:
         unit = {"ipynb": "cell ", "md": "§"}.get(self.kind, "p.")
-        s = f"@{self.citekey} {unit}{self.page}" if self.citekey else f"{self.path} {unit}{self.page}"
+        if self.module == LESSONS and self.citekey:
+            s = f"{LESSON_PREFIX}{self.citekey} {unit}{self.page}"
+        elif self.citekey:
+            s = f"@{self.citekey} {unit}{self.page}"
+        else:
+            s = f"{self.path} {unit}{self.page}"
         if self.original_file:
             s += f" (orig {Path(self.original_file).name} p.{self.original_page})"
         if self.also_pages:
@@ -147,7 +152,8 @@ def _snippet(text: str, query: str, width: int = 300) -> str:
 
 
 def _doc_filter(module: str | None, citekey: str | None, report: str | None,
-                exclude_books: bool = False, exclude_superseded: bool = False) -> tuple[str, list]:
+                exclude_books: bool = False, exclude_superseded: bool = False,
+                project: str | None = None) -> tuple[str, list]:
     """SQL condition over docs alias `d` plus its parameters ('' when unfiltered).
     `module` may be a comma-separated list of codes."""
     clauses, params = [], []
@@ -168,6 +174,9 @@ def _doc_filter(module: str | None, citekey: str | None, report: str | None,
         clauses.append("d.type != 'B'")
     if exclude_superseded:
         clauses.append("d.superseded = 0")
+    if project:
+        clauses.append("d.project = ?")
+        params.append(project)
     return " AND ".join(clauses), params
 
 
@@ -231,7 +240,8 @@ def _books_default(root: Path) -> bool:
 
 def search(root: Path, embedder: Embedder, query: str, module: str | None = None,
            k: int = 8, pool: int = 50, *, citekey: str | None = None, report: str | None = None,
-           books: bool | None = None, superseded: bool = False, config: RankConfig | None = None,
+           books: bool | None = None, superseded: bool = False, project: str | None = None,
+           config: RankConfig | None = None,
            reranker: Reranker | None = None, rerank_n: int | None = None) -> list[Hit]:
     """Hybrid BM25 + vector search fused by RRF. With `config.rerank` and a `reranker`,
     the top `rerank_n` (default RERANK_N) fused candidates are reordered by cross-encoder
@@ -268,7 +278,9 @@ def search(root: Path, embedder: Embedder, query: str, module: str | None = None
         cols = {r[1] for r in conn.execute("PRAGMA table_info(docs)")}
         exclude_superseded = not superseded and "superseded" in cols and conn.execute(
             "SELECT 1 FROM docs WHERE superseded = 1 LIMIT 1").fetchone() is not None
-        where, params = _doc_filter(module, citekey, report, exclude_books, exclude_superseded)
+        if project and "project" not in cols:
+            return []
+        where, params = _doc_filter(module, citekey, report, exclude_books, exclude_superseded, project)
 
         fts_ranked = _fts_ranked(conn, query, where, params, pool, config.and_first)
 

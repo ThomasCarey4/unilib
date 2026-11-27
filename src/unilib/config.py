@@ -193,6 +193,32 @@ def source_meta(entries: list[tuple[tuple[str, ...], SourceMeta]], rel: str) -> 
     return SourceMeta()
 
 
+LESSONS = "LESSONS"  # pseudo-module code under which project lessons are indexed
+LESSON_PREFIX = "lesson:"  # citation and get_page path prefix: lesson:<id>
+
+
+def load_lessons(root: Path) -> tuple[Path, ...]:
+    """Markdown files matching [lessons] globs in modules.toml right now (none without the table)."""
+    mt = root / "modules.toml"
+    if not mt.is_file():
+        return ()
+    t = tomllib.loads(mt.read_text()).get("lessons")
+    if not t:
+        return ()
+    globs = t.get("globs")
+    if isinstance(globs, str):
+        globs = [globs]
+    if not globs or not all(isinstance(g, str) and g for g in globs):
+        raise ValueError("modules.toml: [lessons] needs globs = [\"~/repo/docs/lessons/*.md\", …]")
+    found: dict[Path, None] = {}
+    for g in globs:
+        for p in sorted(glob.glob(os.path.expanduser(g))):
+            path = Path(p)
+            if path.suffix.lower() == ".md" and path.is_file():
+                found.setdefault(path.resolve(), None)
+    return tuple(found)
+
+
 PAPERS = "PAPERS"  # pseudo-module code under which Zotero papers are indexed
 _REPORT_NAME = re.compile(r"[\w.-]+")  # stored comma-joined in docs.reports, and used as a Zotero collection name
 
