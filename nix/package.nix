@@ -4,6 +4,7 @@
   lib,
   stdenv,
   python3,
+  git,
   server ? true,
   # Use PyTorch's CPU wheel (MKL) instead of nixpkgs' source build (see torch-cpu.nix).
   torchWheel ? stdenv.hostPlatform.system == "x86_64-linux" && python3.pythonVersion == "3.14",
@@ -56,7 +57,17 @@ python3Packages.buildPythonApplication {
 
   # The client imports only the stdlib and mcp; the server's checks cover the code.
   doCheck = server;
-  nativeCheckInputs = [ python3Packages.pytestCheckHook ];
+  nativeCheckInputs = [
+    python3Packages.pytestCheckHook
+    git # snapshot tests build a local docs repo
+  ];
+  # `unilib snapshot` (git mode) clones docs repos at a pinned ref.
+  makeWrapperArgs = lib.optionals server [
+    "--prefix"
+    "PATH"
+    ":"
+    (lib.makeBinPath [ git ])
+  ];
   # Real models (slow) and the real library (eval) are not available in the sandbox.
   pytestFlags = [
     "-m"
