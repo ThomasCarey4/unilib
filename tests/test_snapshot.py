@@ -169,3 +169,66 @@ def test_git_snapshot_inlines_partials_and_variables(eng):
     body = (eng / "_ingest" / "tsdb-docs" / "Hypertables.md").read_text()
     assert "Available since TimescaleDB 2.18." in body and "Uses hypertable." in body
     assert "<Since" not in body and "$" not in body.split("---", 2)[2]
+
+
+RFC_TXT = """\
+
+
+
+Internet Engineering Task Force (IETF)                       E. Rescorla
+Request for Comments: 8446                                       Mozilla
+Category: Standards Track                                    August 2018
+
+
+          The Transport Layer Security (TLS) Protocol Version 1.3
+
+Abstract
+
+   This document specifies version 1.3 of the TLS protocol.
+
+1.  Introduction
+
+   The primary goal of TLS is to provide a secure channel.
+
+1.1.  Conventions and Terminology
+
+   The key words "MUST" are to be interpreted as described.
+
+
+
+Rescorla                     Standards Track                    [Page 1]
+\f
+RFC 8446                           TLS                       August 2018
+
+
+7.5.  Exporters
+
+   [RFC5705] defines keying material exporters for TLS.
+"""
+
+
+def test_rfc_text_to_markdown():
+    from unilib.snapshot import rfc_to_markdown
+    md = rfc_to_markdown(RFC_TXT)
+    assert md.startswith("# The Transport Layer Security (TLS) Protocol Version 1.3")
+    assert "\n## Abstract\n" in md and "\n## 1. Introduction\n" in md
+    assert "\n### 1.1. Conventions and Terminology\n" in md and "\n### 7.5. Exporters\n" in md
+    assert "[Page 1]" not in md and "RFC 8446                           TLS" not in md and "\f" not in md
+    assert "keying material exporters" in md
+
+
+def test_rfc_snapshot(eng, tmp_path):
+    txt = tmp_path / "web" / "rfc8446.txt"
+    txt.write_text(RFC_TXT)
+    (eng / "sources.toml").write_text((eng / "sources.toml").read_text() + f'''
+[[snapshot]]
+id = "rfc8446"
+mode = "rfc"
+url = "file://{txt}"
+version = "RFC 8446"
+licence = "IETF Trust"
+''')
+    (out,) = run_snapshot(eng, "rfc8446", log=lambda s: None)
+    meta, body = read(out)
+    assert out.name == "rfc8446.md" and meta["source_url"].endswith("rfc8446.txt")
+    assert any(sec.heading.endswith("7.5. Exporters") for sec in sections(out))

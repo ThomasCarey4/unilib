@@ -4,7 +4,7 @@
 
     [[snapshot]]
     id = "tsdb-2.22-docs"          # output goes to _ingest/<id>/
-    mode = "git"                   # pdf | git | html
+    mode = "git"                   # pdf | git | html | rfc (an RFC's plain-text .txt)
     url = "https://github.com/timescale/docs"
     ref = "<tag or commit>"        # git only
     paths = ["use-timescale/compression/**/*.md"]   # git only: globs relative to the repo
@@ -37,7 +37,7 @@ from .htmlmd import html_to_markdown
 from .markdown import MarkdownError, frontmatter
 from .organize import kebab
 
-MODES = ("pdf", "git", "html")
+MODES = ("pdf", "git", "html", "rfc")
 MAX_FILES = 99  # D01…D99 per module
 _ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _KEYS = {"id", "mode", "url", "urls", "ref", "paths", "group", "version", "licence", "source_url", "notes",
@@ -75,7 +75,7 @@ def load_snapshots(root: Path) -> list[Snapshot]:
             raise ValueError(f"{where}: bad id {sid!r} (lower case, digits, '.', '_', '-')")
         if mode not in MODES:
             raise ValueError(f"{where}: mode must be one of {', '.join(MODES)}")
-        if mode in ("pdf", "git") and not e.get("url"):
+        if mode in ("pdf", "git", "rfc") and not e.get("url"):
             raise ValueError(f"{where}: mode {mode} needs url")
         if mode == "git" and not (e.get("ref") and e.get("paths")):
             raise ValueError(f"{where}: mode git needs ref and paths")
@@ -246,6 +246,58 @@ def _html_snapshot(s: Snapshot, dest: Path, fetched: str, log: Callable[[str], N
     return out
 
 
+_RFC_PAGE_FOOT = re.compile(r"^\S.*\[Page \d+\]\s*$")
+_RFC_PAGE_HEAD = re.compile(r"^RFC \d+\s{2,}.*\s{2,}\S.*\d{4}\s*$")
+_RFC_SECTION = re.compile(r"^((?:\d+|[A-Z])(?:\.\d+)*)\.?\s{1,3}(\S.*)$")
+_RFC_UNNUMBERED = ("Abstract", "Status of This Memo", "Copyright Notice", "Table of Contents",
+                   "Acknowledgments", "Acknowledgements", "Contributors", "Author's Address", "Authors' Addresses")
+
+
+def rfc_to_markdown(text: str) -> str:
+    """An RFC's plain text as markdown: the title as h1, numbered sections as headings (depth by
+    their dots, h2..h4), page headers, footers and form feeds removed; body text kept as is."""
+    lines = [ln.rstrip() for ln in text.replace("\f", "\n").splitlines()]
+    lines = [ln for ln in lines if not (_RFC_PAGE_FOOT.match(ln) or _RFC_PAGE_HEAD.match(ln))]
+    title, out, in_toc = None, [], False
+    for ln in lines:
+        stripped = ln.strip()
+        if title is None and stripped and len(ln) - len(ln.lstrip()) >= 5 and not any(
+                k in ln for k in ("Request for Comments", "Category:", "ISSN:", "Obsoletes:", "Updates:")):
+            title = stripped
+            out.append(f"# {title}")
+            continue
+        if title is None:
+            continue  # the header block before the title
+        if ln and not ln[0].isspace():
+            if stripped in _RFC_UNNUMBERED:
+                in_toc = stripped == "Table of Contents"
+                out.append(f"\n## {stripped}\n")
+                continue
+            m = _RFC_SECTION.match(ln)
+            if m and not in_toc:
+                num, name = m.groups()
+                depth = min(num.count(".") + 2, 4)
+                out.append(f"\n{'#' * depth} {num}. {name.strip()}\n")
+                continue
+            if m and in_toc:
+                in_toc = False  # the first numbered heading after the table of contents
+                num, name = m.groups()
+                out.append(f"\n{'#' * min(num.count('.') + 2, 4)} {num}. {name.strip()}\n")
+                continue
+        out.append(ln)
+    md = "\n".join(out)
+    return re.sub(r"\n{3,}", "\n\n", md).strip() + "\n"
+
+
+def _rfc_snapshot(s: Snapshot, dest: Path, fetched: str, log: Callable[[str], None]) -> list[Path]:
+    log(f"fetching {s.url}")
+    md = rfc_to_markdown(_fetch(s.url).decode("utf-8", errors="replace"))
+    path = dest / f"{s.id}.md"
+    path.write_text(_front({"title": md.splitlines()[0].lstrip("# "), "source_url": s.url, "version": s.version,
+                            "licence": s.licence, "fetched": fetched, "snapshot": s.id}) + "\n" + md)
+    return [path]
+
+
 def _pdf_snapshot(s: Snapshot, dest: Path, fetched: str, log: Callable[[str], None]) -> list[Path]:
     log(f"fetching {s.url}")
     data = _fetch(s.url)
@@ -272,7 +324,8 @@ def run_snapshot(root: Path, sid: str, refresh: bool = False, log: Callable[[str
     dest.mkdir(parents=True)
     fetched = dt.date.today().isoformat()
     try:
-        files = {"pdf": _pdf_snapshot, "git": _git_snapshot, "html": _html_snapshot}[s.mode](s, dest, fetched, log)
+        files = {"pdf": _pdf_snapshot, "git": _git_snapshot, "html": _html_snapshot,
+                 "rfc": _rfc_snapshot}[s.mode](s, dest, fetched, log)
     except BaseException:
         shutil.rmtree(dest, ignore_errors=True)
         raise
